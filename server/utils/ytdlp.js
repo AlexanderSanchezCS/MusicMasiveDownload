@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, renameSync } from 'fs'
 import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
@@ -112,6 +112,9 @@ export async function getVideoInfo(url, isPlaylist = false) {
       view_count: data.view_count,
     }
   } catch (error) {
+    if (error.message.includes('There is no video in this post')) {
+      throw new Error('Este post de Instagram es una imagen, no un video. Solo se pueden descargar Reels y videos.')
+    }
     throw new Error(`Error al obtener info: ${error.message}`)
   }
 }
@@ -176,11 +179,10 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
       )
     } else {
       // Facebook, Instagram, TikTok — single combined stream
-      // Force re-encode to H.264 for universal playback (avoids HEVC codec issues)
+      // Download best quality, we'll re-encode to H.264 after download
       args.push(
         '-f', `best[height<=${quality}]/best`,
-        '--recode-video', 'mp4',
-        '--postprocessor-args', 'VideoConvertor:-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 192k',
+        '-S', 'vcodec:h264',
       )
     }
   }
@@ -195,7 +197,7 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
 
     // Find the output file
     const ext = format === 'mp3' ? 'mp3' : 'mp4'
-    const filePath = join(TEMP_DIR, `${id}.${ext}`)
+    let filePath = join(TEMP_DIR, `${id}.${ext}`)
 
     // Use the title provided by the caller; only fall back to 'download'
     const safeTitle = (title && title.trim()) ? title.trim() : 'download'
@@ -204,24 +206,47 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
       // Try to find the actual file (extension may differ)
       const files = readdirSync(TEMP_DIR).filter(f => f.startsWith(id))
       if (files.length > 0) {
-        const actualPath = join(TEMP_DIR, files[0])
-        const actualExt = files[0].split('.').pop()
-
-        return {
-          filePath: actualPath,
-          filename: `${safeTitle}.${actualExt}`,
-          mimeType: actualExt === 'mp3' ? 'audio/mpeg' : 'video/mp4',
-        }
+        filePath = join(TEMP_DIR, files[0])
+      } else {
+        throw new Error('No se encontró el archivo descargado')
       }
-      throw new Error('No se encontró el archivo descargado')
     }
 
+    // Re-encode non-YouTube MP4 videos to H.264 for universal playback
+    if (format === 'mp4' && platform !== 'youtube') {
+      const h264Path = join(TEMP_DIR, `${id}_h264.mp4`)
+      try {
+        const ffmpegBin = HAS_LOCAL_FFMPEG ? join(FFMPEG_DIR, 'ffmpeg') : 'ffmpeg'
+        await execFileAsync(ffmpegBin, [
+          '-i', filePath,
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+          '-c:a', 'aac', '-b:a', '192k',
+          '-movflags', '+faststart',
+          '-y', h264Path,
+        ], { timeout: 300000 })
+        // Replace original with H.264 version
+        unlinkSync(filePath)
+        filePath = join(TEMP_DIR, `${id}.mp4`)
+        renameSync(h264Path, filePath)
+        console.log(`[h264] Re-encoded ${safeTitle} to H.264`)
+      } catch (e) {
+        console.error('[h264] Re-encode failed, serving original:', e.message)
+        // If re-encode fails, clean up and serve original
+        try { unlinkSync(h264Path) } catch {}
+      }
+    }
+
+    const finalExt = filePath.split('.').pop()
     return {
       filePath,
-      filename: `${safeTitle}.${ext}`,
-      mimeType: ext === 'mp3' ? 'audio/mpeg' : 'video/mp4',
+      filename: `${safeTitle}.${finalExt}`,
+      mimeType: finalExt === 'mp3' ? 'audio/mpeg' : 'video/mp4',
     }
   } catch (error) {
+    // Friendly error for Instagram photo posts
+    if (error.message.includes('There is no video in this post')) {
+      throw new Error('Este post de Instagram es una imagen, no un video. Solo se pueden descargar Reels y videos.')
+    }
     throw new Error(`Error en descarga: ${error.message}`)
   }
 }
