@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, renameSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, renameSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
@@ -10,6 +10,34 @@ const execFileAsync = promisify(execFile)
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+
+// --- Instagram cookies: decode from base64 env var on startup ---
+const IG_COOKIES_PATH = join(tmpdir(), 'ig_cookies.txt')
+;(function initInstagramCookies() {
+  // Option 1: base64-encoded cookies in env var (preferred for Railway)
+  const b64 = process.env.INSTAGRAM_COOKIES_BASE64
+  if (b64) {
+    try {
+      const decoded = Buffer.from(b64, 'base64').toString('utf-8')
+      writeFileSync(IG_COOKIES_PATH, decoded, 'utf-8')
+      console.log('[ig-cookies] Decoded Instagram cookies from INSTAGRAM_COOKIES_BASE64')
+    } catch (e) {
+      console.error('[ig-cookies] Failed to decode INSTAGRAM_COOKIES_BASE64:', e.message)
+    }
+  }
+  // Option 2: direct file path in INSTAGRAM_COOKIES
+  else if (process.env.INSTAGRAM_COOKIES && existsSync(process.env.INSTAGRAM_COOKIES)) {
+    console.log('[ig-cookies] Using cookies file from INSTAGRAM_COOKIES path')
+  }
+})()
+
+function getInstagramCookiesPath() {
+  // Priority: decoded base64 file > direct file path
+  if (existsSync(IG_COOKIES_PATH)) return IG_COOKIES_PATH
+  const envPath = process.env.INSTAGRAM_COOKIES
+  if (envPath && existsSync(envPath)) return envPath
+  return null
+}
 
 /**
  * Clean Instagram URLs: remove tracking parameters that can cause issues.
@@ -65,10 +93,10 @@ function getInstagramArgs() {
     '--no-check-certificates',
   ]
 
-  // Support optional Instagram cookies file via environment variable
-  const cookiesFile = process.env.INSTAGRAM_COOKIES
-  if (cookiesFile && existsSync(cookiesFile)) {
-    args.push('--cookies', cookiesFile)
+  // Use Instagram cookies for authenticated access (bypasses age-gate, login walls)
+  const cookiesPath = getInstagramCookiesPath()
+  if (cookiesPath) {
+    args.push('--cookies', cookiesPath)
   }
 
   return args
