@@ -13,6 +13,9 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 const app = express()
+
+// Trust proxy headers (Railway runs behind a reverse proxy)
+app.set('trust proxy', 1)
 const PORT = process.env.PORT || 4000
 
 // Security
