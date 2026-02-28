@@ -176,11 +176,11 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
       )
     } else {
       // Facebook, Instagram, TikTok — single combined stream
-      // Use 'best' with height filter as fallback, no merge needed
+      // Prefer H.264 (avc) over HEVC for universal playback compatibility
       args.push(
-        '-f', `best[height<=${quality}]/best`,
+        '-f', `best[vcodec^=avc1][height<=${quality}]/best[vcodec^=avc][height<=${quality}]/best[height<=${quality}]/best`,
         '--merge-output-format', 'mp4',
-        '--postprocessor-args', 'ffmpeg:-c:a aac -b:a 192k',
+        '--postprocessor-args', 'ffmpeg:-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 192k',
       )
     }
   }
