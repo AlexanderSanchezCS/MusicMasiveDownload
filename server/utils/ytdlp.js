@@ -1,0 +1,249 @@
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'fs'
+import { join, dirname } from 'path'
+import { tmpdir } from 'os'
+import { randomUUID } from 'crypto'
+import { fileURLToPath } from 'url'
+
+const execFileAsync = promisify(execFile)
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
+// yt-dlp binary - defaults to system PATH
+const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
+
+// ffmpeg location - local bin folder
+const FFMPEG_DIR = join(__dirname, '..', 'bin')
+const HAS_LOCAL_FFMPEG = existsSync(join(FFMPEG_DIR, 'ffmpeg.exe')) || existsSync(join(FFMPEG_DIR, 'ffmpeg'))
+
+// Temp directory for downloads
+const TEMP_DIR = join(tmpdir(), 'musicmasivedownload')
+if (!existsSync(TEMP_DIR)) {
+  mkdirSync(TEMP_DIR, { recursive: true })
+}
+
+// --- Temp file cleanup: remove files older than 30 minutes every 10 minutes ---
+const CLEANUP_INTERVAL_MS = 10 * 60 * 1000 // 10 minutes
+const MAX_FILE_AGE_MS = 30 * 60 * 1000     // 30 minutes
+
+function cleanupTempFiles() {
+  try {
+    const now = Date.now()
+    const files = readdirSync(TEMP_DIR)
+    for (const file of files) {
+      const filePath = join(TEMP_DIR, file)
+      try {
+        const stat = statSync(filePath)
+        if (now - stat.mtimeMs > MAX_FILE_AGE_MS) {
+          unlinkSync(filePath)
+          console.log(`[cleanup] Removed stale temp file: ${file}`)
+        }
+      } catch { /* ignore individual file errors */ }
+    }
+  } catch (err) {
+    console.error('[cleanup] Error cleaning temp dir:', err.message)
+  }
+}
+
+// Run cleanup on startup and then periodically
+cleanupTempFiles()
+setInterval(cleanupTempFiles, CLEANUP_INTERVAL_MS)
+
+/**
+ * Get video information from a supported URL
+ */
+export async function getVideoInfo(url, isPlaylist = false) {
+  const platform = detectPlatform(url)
+
+  const args = [
+    '--dump-json',
+    '--no-warnings',
+    '--no-playlist',
+  ]
+
+  // Instagram needs user-agent
+  if (platform === 'instagram') {
+    args.push('--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+  }
+
+  if (isPlaylist) {
+    args[2] = '--yes-playlist'
+    args.push('--flat-playlist')
+  }
+
+  args.push(url)
+
+  try {
+    const { stdout } = await execFileAsync(YTDLP_PATH, args, {
+      timeout: 30000,
+      maxBuffer: 10 * 1024 * 1024,
+    })
+
+    if (isPlaylist) {
+      const lines = stdout.trim().split('\n').filter(l => l.trim())
+      const videos = lines.map(line => {
+        try {
+          const data = JSON.parse(line)
+          return {
+            id: data.id,
+            title: data.title,
+            url: data.url || data.webpage_url || `https://www.youtube.com/watch?v=${data.id}`,
+            duration: data.duration,
+            thumbnail: data.thumbnail || data.thumbnails?.[0]?.url,
+          }
+        } catch {
+          return null
+        }
+      }).filter(Boolean)
+
+      return { type: 'playlist', videos, count: videos.length }
+    }
+
+    const data = JSON.parse(stdout)
+    return {
+      type: 'video',
+      id: data.id,
+      title: data.title,
+      duration: data.duration,
+      thumbnail: data.thumbnail || data.thumbnails?.[data.thumbnails.length - 1]?.url,
+      uploader: data.uploader,
+      view_count: data.view_count,
+    }
+  } catch (error) {
+    throw new Error(`Error al obtener info: ${error.message}`)
+  }
+}
+
+/**
+ * Detect platform from URL to customize yt-dlp arguments.
+ */
+function detectPlatform(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    if (hostname.includes('youtube') || hostname.includes('youtu.be')) return 'youtube'
+    if (hostname.includes('facebook') || hostname.includes('fb.watch')) return 'facebook'
+    if (hostname.includes('instagram')) return 'instagram'
+    if (hostname.includes('tiktok')) return 'tiktok'
+  } catch {}
+  return 'other'
+}
+
+/**
+ * Download media from a supported URL.
+ * Accepts an optional `title` so the caller can pass the title obtained
+ * from /api/info, avoiding a second yt-dlp call just to get the title.
+ */
+export async function downloadMedia(url, format = 'mp3', quality = '192', title = '') {
+  const id = randomUUID()
+  const outputTemplate = join(TEMP_DIR, `${id}.%(ext)s`)
+  const platform = detectPlatform(url)
+
+  const args = ['--no-warnings', '--no-playlist']
+
+  // Add ffmpeg location if available locally
+  if (HAS_LOCAL_FFMPEG) {
+    args.push('--ffmpeg-location', FFMPEG_DIR)
+  }
+
+  // Use cookies-from-browser or headers for platforms that require auth
+  if (platform === 'instagram') {
+    args.push('--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+  }
+
+  if (format === 'mp3') {
+    args.push(
+      '-x',
+      '--audio-format', 'mp3',
+      '--audio-quality', getAudioQuality(quality),
+    )
+    // --embed-thumbnail only reliable on YouTube
+    if (platform === 'youtube') {
+      args.push('--embed-thumbnail', '--add-metadata')
+    }
+  } else {
+    // MP4 video
+    if (platform === 'youtube') {
+      // YouTube has separate streams — use specific format selector
+      const videoQuality = getVideoQuality(quality)
+      args.push(
+        '-f', videoQuality,
+        '--merge-output-format', 'mp4',
+        '--postprocessor-args', 'ffmpeg:-c:a aac -b:a 192k',
+        '--embed-thumbnail',
+        '--add-metadata',
+      )
+    } else {
+      // Facebook, Instagram, TikTok — single combined stream
+      // Use 'best' with height filter as fallback, no merge needed
+      args.push(
+        '-f', `best[height<=${quality}]/best`,
+        '--merge-output-format', 'mp4',
+        '--postprocessor-args', 'ffmpeg:-c:a aac -b:a 192k',
+      )
+    }
+  }
+
+  args.push('-o', outputTemplate, url)
+
+  try {
+    await execFileAsync(YTDLP_PATH, args, {
+      timeout: 300000, // 5 minutes max
+      maxBuffer: 50 * 1024 * 1024,
+    })
+
+    // Find the output file
+    const ext = format === 'mp3' ? 'mp3' : 'mp4'
+    const filePath = join(TEMP_DIR, `${id}.${ext}`)
+
+    // Use the title provided by the caller; only fall back to 'download'
+    const safeTitle = (title && title.trim()) ? title.trim() : 'download'
+
+    if (!existsSync(filePath)) {
+      // Try to find the actual file (extension may differ)
+      const files = readdirSync(TEMP_DIR).filter(f => f.startsWith(id))
+      if (files.length > 0) {
+        const actualPath = join(TEMP_DIR, files[0])
+        const actualExt = files[0].split('.').pop()
+
+        return {
+          filePath: actualPath,
+          filename: `${safeTitle}.${actualExt}`,
+          mimeType: actualExt === 'mp3' ? 'audio/mpeg' : 'video/mp4',
+        }
+      }
+      throw new Error('No se encontró el archivo descargado')
+    }
+
+    return {
+      filePath,
+      filename: `${safeTitle}.${ext}`,
+      mimeType: ext === 'mp3' ? 'audio/mpeg' : 'video/mp4',
+    }
+  } catch (error) {
+    throw new Error(`Error en descarga: ${error.message}`)
+  }
+}
+
+function getAudioQuality(quality) {
+  const map = {
+    '128': '5',
+    '192': '2',
+    '256': '1',
+    '320': '0',
+  }
+  return map[quality] || '2'
+}
+
+function getVideoQuality(quality) {
+  const map = {
+    '360': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
+    '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+    '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
+    '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+    '1440': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
+    '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
+  }
+  return map[quality] || 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+}
