@@ -6,6 +6,7 @@ import dotenv from 'dotenv'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import downloadRouter from './routes/download.js'
+import { getDownloadStats } from './utils/ytdlp.js'
 
 dotenv.config()
 
@@ -14,40 +15,72 @@ const __dirname = dirname(__filename)
 
 const app = express()
 
-// Trust proxy headers (Railway runs behind a reverse proxy)
+// Trust proxy — set to the number of trusted reverse proxies (Railway/Vercel = 1)
+// SECURITY: Do NOT set to `true` (trusts all proxies → rate-limit bypass via X-Forwarded-For)
 app.set('trust proxy', 1)
 const PORT = process.env.PORT || 4000
 
-// Security
+// Security headers via Helmet
 app.use(helmet({
-  crossOriginResourcePolicy: { policy: 'cross-origin' }
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://va.vercel-scripts.com'],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
+      connectSrc: ["'self'", process.env.FRONTEND_URL || 'https://*.vercel.app', 'https://va.vercel-scripts.com'],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  hsts: { maxAge: 63072000, includeSubDomains: true, preload: true },
 }))
 
-// CORS
+// CORS — SECURITY: Restrict to known frontend origin; reject wildcard in production
+const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean)
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
+  origin: ALLOWED_ORIGINS.length > 0
+    ? (origin, cb) => {
+        // Allow requests with no origin (e.g. server-to-server, curl)
+        if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true)
+        cb(new Error('Blocked by CORS'))
+      }
+    : '*', // fallback for local dev only
   methods: ['GET', 'POST'],
   credentials: true,
   exposedHeaders: ['Content-Length', 'Content-Disposition'],
 }))
 
 // --- Differentiated rate limiting ---
-// Light endpoints (info, playlist, health): 200 req / 15 min
+// Light endpoints (info, playlist, health): 300 req / 15 min per IP
+// A user downloading 100 songs makes ~100 info calls over ~30 min → ~50/window
 const infoLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 200,
+  max: 300,
   message: { error: 'Demasiadas solicitudes de información. Intenta de nuevo en unos minutos.' },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
 })
 
-// Heavy endpoint (download): 50 req / 15 min (each one spawns yt-dlp + ffmpeg)
+// Heavy endpoint (download): 150 req / 15 min per IP
+// A user downloading 100 songs at 3 concurrent → ~50 downloads per 15 min window
 const downloadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 50,
+  max: 150,
   message: { error: 'Demasiadas descargas. Intenta de nuevo en unos minutos.' },
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
 })
 
 app.use('/api/info', infoLimiter)
@@ -55,23 +88,49 @@ app.use('/api/playlist', infoLimiter)
 app.use('/api/health', infoLimiter)
 app.use('/api/download', downloadLimiter)
 
-// Body parser
-app.use(express.json({ limit: '10mb' }))
+// Body parser — SECURITY: 1 MB is more than enough for JSON payloads with URLs
+app.use(express.json({ limit: '1mb' }))
 
-// Health check
+// Global request timeout (5 minutes — downloads of large files need more time)
+app.use((req, res, next) => {
+  const timeout = req.path.includes('/download') ? 300000 : 120000
+  res.setTimeout(timeout, () => {
+    if (!res.headersSent) {
+      res.status(408).json({ error: 'La solicitud tardó demasiado.' })
+    }
+  })
+  next()
+})
+
+// Health check — includes download queue stats for monitoring
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+  const stats = getDownloadStats()
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    downloads: stats,
+    uptime: Math.round(process.uptime()),
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+  })
 })
 
 // Routes
 app.use('/api', downloadRouter)
 
-// Error handler
+// CORS rejection handler
+app.use((err, req, res, next) => {
+  if (err.message === 'Blocked by CORS') {
+    return res.status(403).json({ error: 'Origin no permitido.' })
+  }
+  next(err)
+})
+
+// Global error handler — SECURITY: never leak stack traces or internal paths
 app.use((err, req, res, next) => {
   console.error('Server error:', err)
   res.status(500).json({
     error: 'Error interno del servidor',
-    message: process.env.NODE_ENV === 'development' ? err.message : undefined
+    ...(process.env.NODE_ENV === 'development' && { message: err.message }),
   })
 })
 

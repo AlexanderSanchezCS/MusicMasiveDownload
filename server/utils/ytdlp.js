@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, renameSync, writeFileSync, chmodSync } from 'fs'
 import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
@@ -19,7 +19,9 @@ const IG_COOKIES_PATH = join(tmpdir(), 'ig_cookies.txt')
   if (b64) {
     try {
       const decoded = Buffer.from(b64, 'base64').toString('utf-8')
-      writeFileSync(IG_COOKIES_PATH, decoded, 'utf-8')
+      writeFileSync(IG_COOKIES_PATH, decoded, { encoding: 'utf-8', mode: 0o600 })
+      // SECURITY: restrict cookie file permissions (owner-only)
+      try { chmodSync(IG_COOKIES_PATH, 0o600) } catch {}
       console.log('[ig-cookies] Decoded Instagram cookies from INSTAGRAM_COOKIES_BASE64')
     } catch (e) {
       console.error('[ig-cookies] Failed to decode INSTAGRAM_COOKIES_BASE64:', e.message)
@@ -90,7 +92,8 @@ function getInstagramArgs() {
     '--add-header', 'Sec-Fetch-Mode:navigate',
     '--extractor-retries', '3',
     '--socket-timeout', '30',
-    '--no-check-certificates',
+    // SECURITY: DO NOT use --no-check-certificates; it disables TLS verification
+    // making the connection vulnerable to man-in-the-middle attacks.
   ]
 
   // Use Instagram cookies for authenticated access (bypasses age-gate, login walls)
@@ -132,6 +135,41 @@ async function execWithRetry(args, opts, maxRetries = 2) {
   throw lastError
 }
 
+// --- Concurrency limiter: prevent too many simultaneous yt-dlp / ffmpeg processes ---
+// SCALE: 10 concurrent processes handles ~100 users well on Railway (1-2 vCPU, 2-8GB RAM).
+// Each yt-dlp process uses ~50-100MB RAM. Adjust via env var for your server capacity.
+const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT_DOWNLOADS || '10', 10)
+let activeDownloads = 0
+const downloadQueue = []
+
+function acquireSlot() {
+  return new Promise((resolve) => {
+    if (activeDownloads < MAX_CONCURRENT_DOWNLOADS) {
+      activeDownloads++
+      return resolve()
+    }
+    downloadQueue.push(resolve)
+  })
+}
+
+function releaseSlot() {
+  activeDownloads--
+  if (downloadQueue.length > 0) {
+    activeDownloads++
+    const next = downloadQueue.shift()
+    next()
+  }
+}
+
+// Expose stats for health check / monitoring
+export function getDownloadStats() {
+  return {
+    active: activeDownloads,
+    queued: downloadQueue.length,
+    maxConcurrent: MAX_CONCURRENT_DOWNLOADS,
+  }
+}
+
 // yt-dlp binary - defaults to system PATH
 const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
 
@@ -145,24 +183,27 @@ if (!existsSync(TEMP_DIR)) {
   mkdirSync(TEMP_DIR, { recursive: true })
 }
 
-// --- Temp file cleanup: remove files older than 30 minutes every 10 minutes ---
-const CLEANUP_INTERVAL_MS = 10 * 60 * 1000 // 10 minutes
-const MAX_FILE_AGE_MS = 30 * 60 * 1000     // 30 minutes
+// --- Temp file cleanup: remove files older than 10 minutes every 5 minutes ---
+// SCALE: With hundreds of users, files build up fast. Aggressive cleanup needed.
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000  // 5 minutes
+const MAX_FILE_AGE_MS = 10 * 60 * 1000     // 10 minutes (file already streamed by then)
 
 function cleanupTempFiles() {
   try {
     const now = Date.now()
     const files = readdirSync(TEMP_DIR)
+    let cleaned = 0
     for (const file of files) {
       const filePath = join(TEMP_DIR, file)
       try {
         const stat = statSync(filePath)
         if (now - stat.mtimeMs > MAX_FILE_AGE_MS) {
           unlinkSync(filePath)
-          console.log(`[cleanup] Removed stale temp file: ${file}`)
+          cleaned++
         }
       } catch { /* ignore individual file errors */ }
     }
+    if (cleaned > 0) console.log(`[cleanup] Removed ${cleaned} stale temp files (${files.length - cleaned} remaining)`)
   } catch (err) {
     console.error('[cleanup] Error cleaning temp dir:', err.message)
   }
@@ -203,7 +244,7 @@ export async function getVideoInfo(url, isPlaylist = false) {
 
   const execOpts = {
     timeout: platform === 'instagram' ? 60000 : 30000,
-    maxBuffer: 10 * 1024 * 1024,
+    maxBuffer: 5 * 1024 * 1024, // PERF: 5 MB is plenty for JSON metadata
   }
 
   try {
@@ -271,6 +312,17 @@ function detectPlatform(url) {
  * from /api/info, avoiding a second yt-dlp call just to get the title.
  */
 export async function downloadMedia(url, format = 'mp3', quality = '192', title = '') {
+  // PERF: Wait for a concurrency slot before spawning yt-dlp
+  await acquireSlot()
+
+  try {
+    return await _downloadMediaImpl(url, format, quality, title)
+  } finally {
+    releaseSlot()
+  }
+}
+
+async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = '') {
   const id = randomUUID()
   const outputTemplate = join(TEMP_DIR, `${id}.%(ext)s`)
   const platform = detectPlatform(url)
@@ -328,7 +380,7 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
 
   const dlOpts = {
     timeout: 300000, // 5 minutes max
-    maxBuffer: 50 * 1024 * 1024,
+    maxBuffer: 10 * 1024 * 1024, // PERF: reduced from 50 MB; yt-dlp stdout for a single download is small
   }
 
   try {

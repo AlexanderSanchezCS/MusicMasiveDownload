@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { HiArrowDown, HiCheck, HiXMark, HiTrash, HiMusicalNote } from 'react-icons/hi2'
 import useStore from '../store/useStore'
@@ -21,7 +22,8 @@ function ProgressBar({ progress, status }) {
   )
 }
 
-function DownloadItem({ download }) {
+// PERF: Memoize individual download items to avoid re-rendering the whole list
+const DownloadItem = memo(function DownloadItem({ download }) {
   const { removeDownload } = useStore()
 
   const statusIcons = {
@@ -95,7 +97,7 @@ function DownloadItem({ download }) {
       </div>
     </motion.div>
   )
-}
+})
 
 export default function DownloadQueue() {
   const { downloads, clearDownloads } = useStore()

@@ -2,6 +2,14 @@ import { create } from 'zustand'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 
+// Max concurrent browser downloads — 3 keeps browser memory manageable
+// (3 concurrent × ~10MB avg MP3 = ~30MB RAM peak; for MP4 ~150MB peak)
+const MAX_CONCURRENT = 3
+
+// Max history entries and max localStorage size (bytes)
+const MAX_HISTORY = 500
+const MAX_LOCALSTORAGE_BYTES = 5 * 1024 * 1024 // 5 MB safety limit
+
 /**
  * Supported platforms configuration
  */
@@ -111,11 +119,28 @@ const useStore = create((set, get) => ({
   })),
   clearDownloads: () => set({ downloads: [] }),
 
-  // History
-  history: JSON.parse(localStorage.getItem('mmdownload_history') || '[]'),
+  // History — SECURITY: bound size to avoid localStorage quota errors
+  history: (() => {
+    try {
+      return JSON.parse(localStorage.getItem('mmdownload_history') || '[]')
+    } catch {
+      return []
+    }
+  })(),
   addToHistory: (item) => set((s) => {
-    const newHistory = [{ ...item, downloadedAt: new Date().toISOString() }, ...s.history].slice(0, 100)
-    localStorage.setItem('mmdownload_history', JSON.stringify(newHistory))
+    const newHistory = [
+      { ...item, downloadedAt: new Date().toISOString() },
+      ...s.history,
+    ].slice(0, MAX_HISTORY)
+    try {
+      const serialized = JSON.stringify(newHistory)
+      // SECURITY: guard against localStorage quota exhaustion
+      if (serialized.length < MAX_LOCALSTORAGE_BYTES) {
+        localStorage.setItem('mmdownload_history', serialized)
+      }
+    } catch {
+      // Storage full — silently skip persistence
+    }
     return { history: newHistory }
   }),
   clearHistory: () => {
@@ -237,6 +262,8 @@ const useStore = create((set, get) => ({
       // 4. Build blob and trigger browser download  →  95 → 100 %
       updateDownload(id, { progress: 97 })
       const blob = new Blob(chunks)
+      // PERF: Release chunk references immediately to free memory for next downloads
+      chunks.length = 0
       const filename = `${info.title || 'download'}.${format}`
 
       const blobUrl = window.URL.createObjectURL(blob)
@@ -246,7 +273,8 @@ const useStore = create((set, get) => ({
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
-      window.URL.revokeObjectURL(blobUrl)
+      // PERF: Delay revokeObjectURL slightly so the browser has time to start the save dialog
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 5000)
 
       updateDownload(id, { progress: 100, status: 'completed' })
       addToHistory({ url, title: info.title, format, quality, thumbnail: info.thumbnail })
@@ -255,7 +283,7 @@ const useStore = create((set, get) => ({
     }
   },
 
-  // ---------- Start batch download (with playlist support) ----------
+  // ---------- Start batch download with concurrency-limited parallelism ----------
   startBatchDownload: async () => {
     const { parseUrls, resolvePlaylist, downloadSingle, format, quality, updateDownload, setIsProcessing } = get()
     let validUrls = parseUrls()
@@ -280,14 +308,25 @@ const useStore = create((set, get) => ({
       }
     }
 
-    // Queue all downloads
-    for (const url of expandedUrls) {
+    // Queue all downloads with IDs
+    const entries = expandedUrls.map((url) => {
       const id = Date.now() + Math.random()
       set((s) => ({
         downloads: [...s.downloads, { url, title: 'Obteniendo información...', format, quality, id, progress: 0, status: 'downloading' }]
       }))
-      await downloadSingle(url, id)
+      return { url, id }
+    })
+
+    // PERF: Run downloads with limited concurrency instead of sequentially
+    const executing = new Set()
+    for (const entry of entries) {
+      const p = downloadSingle(entry.url, entry.id).then(() => executing.delete(p))
+      executing.add(p)
+      if (executing.size >= MAX_CONCURRENT) {
+        await Promise.race(executing)
+      }
     }
+    await Promise.all(executing)
 
     setIsProcessing(false)
   },

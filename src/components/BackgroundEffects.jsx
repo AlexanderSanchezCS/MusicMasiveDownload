@@ -1,6 +1,20 @@
-import { motion } from 'framer-motion'
+import { motion, useReducedMotion } from 'framer-motion'
 
 export default function BackgroundEffects() {
+  // PERF: respect user's prefers-reduced-motion setting
+  const shouldReduceMotion = useReducedMotion()
+
+  // On reduced motion or low-end devices, skip expensive background animations
+  if (shouldReduceMotion) {
+    return (
+      <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
+        <div className="absolute -top-40 -right-40 w-[600px] h-[600px] bg-red-600/[0.03] rounded-full blur-3xl" />
+        <div className="absolute inset-0 dot-pattern opacity-30" />
+        <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-red-500/20 to-transparent" />
+      </div>
+    )
+  }
+
   return (
     <div className="fixed inset-0 z-0 pointer-events-none overflow-hidden">
       {/* Subtle gradient orbs */}
@@ -36,7 +50,7 @@ export default function BackgroundEffects() {
       {/* Top gradient line */}
       <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-red-500/20 to-transparent" />
 
-      {/* Floating particles */}
+      {/* Floating particles — PERF: use will-change to hint GPU compositing */}
       {[...Array(6)].map((_, i) => (
         <motion.div
           key={i}
@@ -44,6 +58,7 @@ export default function BackgroundEffects() {
           style={{
             left: `${15 + i * 15}%`,
             top: `${20 + (i % 3) * 25}%`,
+            willChange: 'transform, opacity',
           }}
           animate={{
             y: [0, -30, 0],
