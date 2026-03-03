@@ -410,28 +410,29 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
     // MP4 video
     if (platform === 'youtube') {
       // YouTube has separate streams — use specific format selector
+      // Prefer H.264+AAC for instant merge; falls back to VP9+opus if needed
       const videoQuality = getVideoQuality(quality)
       args.push(
         '-f', videoQuality,
         '--merge-output-format', 'mp4',
-        '--postprocessor-args', 'ffmpeg:-c:a aac -b:a 192k',
-        '--embed-thumbnail',
-        '--add-metadata',
       )
     } else {
-      // Facebook, Instagram, TikTok — single combined stream
-      // Download best quality, we'll re-encode to H.264 after download
+      // Facebook, Instagram, TikTok — prefer H.264 for MP4 compatibility.
+      // Use --remux-video to convert container to MP4 without slow re-encoding.
       args.push(
-        '-f', `best[height<=${quality}]/best`,
-        '-S', 'vcodec:h264',
+        '-f', `best[height<=${quality}][vcodec^=avc]/best[height<=${quality}]/best`,
+        '-S', 'vcodec:h264,acodec:aac',
+        '--remux-video', 'mp4',
       )
     }
   }
 
   args.push('-o', outputTemplate, url)
 
+  // MP4 merges (especially if ffmpeg needs to transcode audio) can take longer than MP3
+  const dlTimeout = format === 'mp4' ? 600000 : 300000 // 10 min MP4, 5 min MP3
   const dlOpts = {
-    timeout: 300000, // 5 minutes max
+    timeout: dlTimeout,
     maxBuffer: 10 * 1024 * 1024, // PERF: reduced from 50 MB; yt-dlp stdout for a single download is small
   }
 
@@ -456,30 +457,6 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
         filePath = join(TEMP_DIR, files[0])
       } else {
         throw new Error('No se encontró el archivo descargado')
-      }
-    }
-
-    // Re-encode non-YouTube MP4 videos to H.264 for universal playback
-    if (format === 'mp4' && platform !== 'youtube') {
-      const h264Path = join(TEMP_DIR, `${id}_h264.mp4`)
-      try {
-        const ffmpegBin = HAS_LOCAL_FFMPEG ? join(FFMPEG_DIR, 'ffmpeg') : 'ffmpeg'
-        await execFileAsync(ffmpegBin, [
-          '-i', filePath,
-          '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-          '-c:a', 'aac', '-b:a', '192k',
-          '-movflags', '+faststart',
-          '-y', h264Path,
-        ], { timeout: 300000 })
-        // Replace original with H.264 version
-        unlinkSync(filePath)
-        filePath = join(TEMP_DIR, `${id}.mp4`)
-        renameSync(h264Path, filePath)
-        console.log(`[h264] Re-encoded ${safeTitle} to H.264`)
-      } catch (e) {
-        console.error('[h264] Re-encode failed, serving original:', e.message)
-        // If re-encode fails, clean up and serve original
-        try { unlinkSync(h264Path) } catch {}
       }
     }
 
@@ -510,13 +487,15 @@ function getAudioQuality(quality) {
 }
 
 function getVideoQuality(quality) {
+  // Prefer H.264 (avc1) + AAC (mp4a) to avoid slow VP9→H.264 re-encoding when merging to MP4.
+  // Fallback chain: avc1+mp4a → avc1+any → any+any → single best stream.
   const map = {
-    '360': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
-    '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-    '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-    '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-    '1440': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
-    '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
+    '360':  `bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]`,
+    '480':  `bestvideo[height<=480][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=480][vcodec^=avc1]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]`,
+    '720':  `bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=720][vcodec^=avc1]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]`,
+    '1080': `bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]`,
+    '1440': `bestvideo[height<=1440][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1440][vcodec^=avc1]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]`,
+    '2160': `bestvideo[height<=2160][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=2160][vcodec^=avc1]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]`,
   }
-  return map[quality] || 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+  return map[quality] || map['720']
 }
