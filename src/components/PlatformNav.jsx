@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { FaYoutube, FaFacebook, FaInstagram, FaTiktok, FaGlobe } from 'react-icons/fa'
+import { FaYoutube, FaFacebook, FaInstagram, FaTiktok } from 'react-icons/fa'
 import useStore, { PLATFORMS } from '../store/useStore'
 
 const ICON_MAP = {
@@ -9,13 +9,11 @@ const ICON_MAP = {
   FaTiktok: FaTiktok,
 }
 
-const allTab = { id: 'all', label: 'Todas', color: '#dc2626' }
-
 export default function PlatformNav() {
   const activePlatform = useStore((s) => s.activePlatform)
   const setActivePlatform = useStore((s) => s.setActivePlatform)
 
-  const tabs = [allTab, ...PLATFORMS]
+  const tabs = PLATFORMS
 
   return (
     <nav
@@ -25,7 +23,7 @@ export default function PlatformNav() {
       <div className="flex items-center justify-center gap-1 sm:gap-2 p-1.5 rounded-2xl bg-white/5 backdrop-blur-sm border border-white/10">
         {tabs.map((tab) => {
           const isActive = activePlatform === tab.id
-          const Icon = tab.id === 'all' ? FaGlobe : ICON_MAP[tab.icon]
+          const Icon = ICON_MAP[tab.icon]
 
           return (
             <motion.button

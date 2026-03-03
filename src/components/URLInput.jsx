@@ -32,11 +32,6 @@ export default function URLInput() {
 
   // Platform-specific UI config
   const PLATFORM_CONFIG = {
-    all: {
-      subtitle: 'YouTube, Facebook, Instagram o TikTok \u2014 separados por l\u00edneas o comas',
-      placeholder: 'https://www.youtube.com/watch?v=...\nhttps://www.instagram.com/reel/...\nhttps://www.tiktok.com/@user/video/...\nhttps://www.facebook.com/watch/?v=...',
-      ariaLabel: 'Pega uno o m\u00e1s links de YouTube, Facebook, Instagram o TikTok',
-    },
     youtube: {
       subtitle: 'Pega links de YouTube \u2014 videos, shorts o playlists',
       placeholder: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ\nhttps://youtu.be/dQw4w9WgXcQ\nhttps://www.youtube.com/shorts/...',
@@ -59,8 +54,8 @@ export default function URLInput() {
     },
   }
 
-  const platformConfig = PLATFORM_CONFIG[activePlatform] || PLATFORM_CONFIG.all
-  const platformLabel = activePlatform === 'all' ? '' : ` de ${activePlatform.charAt(0).toUpperCase() + activePlatform.slice(1)}`
+  const platformConfig = PLATFORM_CONFIG[activePlatform] || PLATFORM_CONFIG.youtube
+  const platformLabel = ` de ${activePlatform.charAt(0).toUpperCase() + activePlatform.slice(1)}`
 
   const handleDownload = () => {
     if (validCount === 0) {

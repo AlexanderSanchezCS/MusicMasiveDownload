@@ -185,7 +185,7 @@ const useStore = create((set, get) => ({
   setShowHistory: (v) => set({ showHistory: v }),
 
   // Active platform filter — filters URLs to only accept selected platform
-  activePlatform: 'all',
+  activePlatform: 'youtube',
   setActivePlatform: (p) => set({ activePlatform: p, urls: '' }),
 
   // Parse URLs from text — filters by active platform
