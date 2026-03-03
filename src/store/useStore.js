@@ -65,6 +65,21 @@ function isSupportedUrl(url) {
 }
 
 /**
+ * Check if a URL belongs to a specific platform.
+ */
+function isSupportedUrlForPlatform(url, platformId) {
+  if (platformId === 'all') return isSupportedUrl(url)
+  const platform = PLATFORMS.find(p => p.id === platformId)
+  if (!platform) return isSupportedUrl(url)
+  try {
+    const u = new URL(url)
+    return platform.hosts.some(h => u.hostname === h || u.hostname.endsWith('.' + h))
+  } catch {
+    return false
+  }
+}
+
+/**
  * Detect whether a YouTube URL points to a playlist.
  */
 function isPlaylistUrl(url) {
@@ -169,15 +184,15 @@ const useStore = create((set, get) => ({
   showHistory: false,
   setShowHistory: (v) => set({ showHistory: v }),
 
-  // Active platform filter (cosmetic — all platforms always accepted)
+  // Active platform filter — filters URLs to only accept selected platform
   activePlatform: 'all',
-  setActivePlatform: (p) => set({ activePlatform: p }),
+  setActivePlatform: (p) => set({ activePlatform: p, urls: '' }),
 
-  // Parse URLs from text (supports all platforms)
+  // Parse URLs from text — filters by active platform
   parseUrls: () => {
-    const { urls } = get()
+    const { urls, activePlatform } = get()
     const lines = urls.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 0)
-    return lines.filter(l => isSupportedUrl(l))
+    return lines.filter(l => isSupportedUrlForPlatform(l, activePlatform))
   },
 
   // ---------- Playlist resolution ----------

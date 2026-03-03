@@ -22,13 +22,45 @@ const QUALITIES = {
 }
 
 export default function URLInput() {
-  const { urls, setUrls, parseUrls, startBatchDownload, isProcessing, format, setFormat, quality, setQuality } = useStore()
+  const { urls, setUrls, parseUrls, startBatchDownload, isProcessing, format, setFormat, quality, setQuality, activePlatform } = useStore()
   const [showQuality, setShowQuality] = useState(false)
 
   const validCount = parseUrls().length
   const lineCount = urls.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 0).length
   const currentQualities = QUALITIES[format]
   const activeQuality = currentQualities.find(q => q.id === quality) || currentQualities[1]
+
+  // Platform-specific UI config
+  const PLATFORM_CONFIG = {
+    all: {
+      subtitle: 'YouTube, Facebook, Instagram o TikTok \u2014 separados por l\u00edneas o comas',
+      placeholder: 'https://www.youtube.com/watch?v=...\nhttps://www.instagram.com/reel/...\nhttps://www.tiktok.com/@user/video/...\nhttps://www.facebook.com/watch/?v=...',
+      ariaLabel: 'Pega uno o m\u00e1s links de YouTube, Facebook, Instagram o TikTok',
+    },
+    youtube: {
+      subtitle: 'Pega links de YouTube \u2014 videos, shorts o playlists',
+      placeholder: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ\nhttps://youtu.be/dQw4w9WgXcQ\nhttps://www.youtube.com/shorts/...',
+      ariaLabel: 'Pega uno o m\u00e1s links de YouTube',
+    },
+    facebook: {
+      subtitle: 'Pega links de Facebook \u2014 videos, reels o watch',
+      placeholder: 'https://www.facebook.com/watch/?v=...\nhttps://fb.watch/...\nhttps://www.facebook.com/reel/...',
+      ariaLabel: 'Pega uno o m\u00e1s links de Facebook',
+    },
+    instagram: {
+      subtitle: 'Pega links de Instagram \u2014 reels o videos p\u00fablicos',
+      placeholder: 'https://www.instagram.com/reel/ABC123/\nhttps://www.instagram.com/p/ABC123/',
+      ariaLabel: 'Pega uno o m\u00e1s links de Instagram',
+    },
+    tiktok: {
+      subtitle: 'Pega links de TikTok \u2014 videos de cualquier usuario',
+      placeholder: 'https://www.tiktok.com/@user/video/123456\nhttps://vm.tiktok.com/ABC123/',
+      ariaLabel: 'Pega uno o m\u00e1s links de TikTok',
+    },
+  }
+
+  const platformConfig = PLATFORM_CONFIG[activePlatform] || PLATFORM_CONFIG.all
+  const platformLabel = activePlatform === 'all' ? '' : ` de ${activePlatform.charAt(0).toUpperCase() + activePlatform.slice(1)}`
 
   const handleDownload = () => {
     if (validCount === 0) {
@@ -52,8 +84,8 @@ export default function URLInput() {
           <HiLink className="text-red-500" />
         </div>
         <div>
-          <h3 className="text-white font-semibold text-lg">Pega tus enlaces</h3>
-          <p className="text-gray-500 text-xs">YouTube, Facebook, Instagram o TikTok — separados por líneas o comas</p>
+          <h3 className="text-white font-semibold text-lg">Pega tus enlaces{platformLabel}</h3>
+          <p className="text-gray-500 text-xs">{platformConfig.subtitle}</p>
         </div>
       </div>
 
@@ -62,10 +94,10 @@ export default function URLInput() {
         <label htmlFor="media-urls" className="sr-only">URLs de medios</label>
         <textarea
           id="media-urls"
-          aria-label="Pega uno o más links de YouTube, Facebook, Instagram o TikTok"
+          aria-label={platformConfig.ariaLabel}
           value={urls}
           onChange={(e) => setUrls(e.target.value)}
-          placeholder={`https://www.youtube.com/watch?v=...\nhttps://www.instagram.com/reel/...\nhttps://www.tiktok.com/@user/video/...\nhttps://www.facebook.com/watch/?v=...`}
+          placeholder={platformConfig.placeholder}
           rows={5}
           className="w-full input-dark rounded-xl px-5 py-4 text-sm text-gray-200 placeholder-gray-600 resize-none font-mono leading-relaxed"
           disabled={isProcessing}
@@ -82,7 +114,7 @@ export default function URLInput() {
       </div>
 
       {/* Info bar */}
-      <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
+      <div className="flex flex-wrap items-center gap-4 mt-3 text-xs text-gray-500">
         <span>{lineCount} link(s) ingresados</span>
         <span className="text-gray-700">•</span>
         <span className={validCount > 0 ? 'text-green-400' : 'text-gray-500'}>
@@ -91,7 +123,9 @@ export default function URLInput() {
         {lineCount > validCount && lineCount > 0 && (
           <>
             <span className="text-gray-700">•</span>
-            <span className="text-red-400">{lineCount - validCount} inválido(s)</span>
+            <span className="text-red-400">
+              {lineCount - validCount} {activePlatform !== 'all' ? `no son de ${activePlatform.charAt(0).toUpperCase() + activePlatform.slice(1)}` : 'inválido(s)'}
+            </span>
           </>
         )}
       </div>
