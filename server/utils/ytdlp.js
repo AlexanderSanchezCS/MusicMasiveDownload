@@ -249,6 +249,68 @@ cleanupTempFiles()
 setInterval(cleanupTempFiles, CLEANUP_INTERVAL_MS)
 
 /**
+ * Get the direct CDN download URL for a video (no disk I/O needed).
+ * Used for streaming proxy: Railway fetches from CDN and pipes to client.
+ * Returns { directUrl, platform } or null if not possible.
+ *
+ * Only works for MP4 single-stream cases:
+ * - YouTube ≤720p (pre-muxed MP4 available)
+ * - TikTok, Instagram, Facebook (single combined stream)
+ *
+ * Returns null for MP3 (needs ffmpeg) or YouTube 1080p+ (needs merge).
+ */
+export async function getDirectUrl(url, format = 'mp4', quality = '720') {
+  if (format !== 'mp4') return null
+
+  const platform = detectPlatform(url)
+
+  // YouTube 1080p+ has separate video+audio streams that need merging
+  if (platform === 'youtube' && parseInt(quality) > 720) return null
+
+  // Clean URLs
+  if (platform === 'instagram') url = cleanInstagramUrl(url)
+  if (platform === 'facebook') url = await resolveFacebookUrl(url)
+
+  // -g = print direct URL only (no download, very fast ~2-3s)
+  const args = ['--no-warnings', '--no-playlist', '--no-check-formats', '-g']
+
+  if (platform === 'instagram') args.push(...getInstagramArgs())
+
+  if (platform === 'youtube') {
+    args.push('-f', `best[height<=${quality}][ext=mp4]/best[ext=mp4]`)
+  } else {
+    args.push(
+      '-f', `best[height<=${quality}][ext=mp4]/best[ext=mp4]/best[height<=${quality}]/best`,
+      '-S', 'vcodec:h264,acodec:aac',
+    )
+  }
+
+  args.push(url)
+
+  try {
+    const execFn = platform === 'instagram'
+      ? () => execWithRetry(args, { timeout: 30000, maxBuffer: 1024 * 1024 })
+      : () => execFileAsync(YTDLP_PATH, args, { timeout: 30000, maxBuffer: 1024 * 1024 })
+
+    const { stdout } = await execFn()
+    const lines = stdout.trim().split('\n').filter(l => l.startsWith('http'))
+
+    // Single URL = single stream, can stream directly
+    // Multiple URLs = separate video+audio, need merge → can't stream
+    if (lines.length === 1) {
+      console.log(`[direct-url] Got CDN URL for ${platform} (${quality}p)`)
+      return { directUrl: lines[0], platform }
+    }
+
+    console.log(`[direct-url] Got ${lines.length} URLs (needs merge), falling back to disk`)
+    return null
+  } catch (e) {
+    console.error('[direct-url] Failed:', e.message)
+    return null
+  }
+}
+
+/**
  * Get video information from a supported URL
  */
 export async function getVideoInfo(url, isPlaylist = false) {

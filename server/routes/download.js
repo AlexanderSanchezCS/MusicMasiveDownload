@@ -1,5 +1,6 @@
 import { Router } from 'express'
-import { getVideoInfo, downloadMedia } from '../utils/ytdlp.js'
+import { Readable } from 'stream'
+import { getVideoInfo, downloadMedia, getDirectUrl } from '../utils/ytdlp.js'
 
 const router = Router()
 
@@ -95,6 +96,60 @@ router.post('/download', async (req, res) => {
     // Sanitize title for Content-Disposition
     const safeTitle = sanitizeTitle(title)
 
+    // --- FAST PATH: Streaming proxy for MP4 ---
+    // Gets the direct CDN URL (~2s) and streams it to the client.
+    // No disk I/O on Railway = much faster for TikTok, IG, FB, YouTube ≤720p.
+    if (format === 'mp4') {
+      try {
+        const result = await getDirectUrl(url, format, safeQuality)
+        if (result) {
+          const { directUrl } = result
+          const controller = new AbortController()
+          const fetchTimeout = setTimeout(() => controller.abort(), 300000)
+
+          const cdnRes = await fetch(directUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            },
+            signal: controller.signal,
+          })
+
+          if (cdnRes.ok && cdnRes.body) {
+            const contentLength = cdnRes.headers.get('content-length')
+            if (contentLength) res.setHeader('Content-Length', contentLength)
+            const mp4Filename = `${safeTitle}.mp4`
+            res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(mp4Filename)}"; filename*=UTF-8''${encodeURIComponent(mp4Filename)}`)
+            res.setHeader('Content-Type', 'video/mp4')
+            res.setHeader('X-Content-Type-Options', 'nosniff')
+
+            const nodeStream = Readable.fromWeb(cdnRes.body)
+            nodeStream.pipe(res)
+
+            nodeStream.on('error', (err) => {
+              clearTimeout(fetchTimeout)
+              console.error('[stream-proxy] Stream error:', err.message)
+              if (!res.headersSent) res.status(500).json({ error: 'Error en streaming' })
+            })
+
+            req.on('close', () => {
+              clearTimeout(fetchTimeout)
+              if (!res.writableFinished) {
+                nodeStream.destroy()
+                controller.abort()
+              }
+            })
+
+            res.on('finish', () => clearTimeout(fetchTimeout))
+            return // Streaming in progress — done
+          }
+          clearTimeout(fetchTimeout)
+        }
+      } catch (streamErr) {
+        console.log('[stream-proxy] Falling back to disk download:', streamErr.message)
+      }
+    }
+
+    // --- FALLBACK: Disk-based download (MP3, YouTube 1080p+, failed stream) ---
     const { filePath, filename, mimeType } = await downloadMedia(url, format, safeQuality, safeTitle)
 
     // Send Content-Length so the client can compute real download progress
