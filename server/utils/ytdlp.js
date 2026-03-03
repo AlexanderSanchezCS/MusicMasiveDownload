@@ -386,6 +386,9 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
 
   const args = ['--no-warnings', '--no-playlist']
 
+  // PERF: Skip format URL verification — saves 1-3 seconds per download
+  args.push('--no-check-formats')
+
   // Add ffmpeg location if available locally
   if (HAS_LOCAL_FFMPEG) {
     args.push('--ffmpeg-location', FFMPEG_DIR)
@@ -416,11 +419,13 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
         '-f', videoQuality,
         '--merge-output-format', 'mp4',
       )
+      // PERF: Download multiple fragments in parallel for faster downloads
+      args.push('--concurrent-fragments', '4')
     } else {
-      // Facebook, Instagram, TikTok — prefer H.264 for MP4 compatibility.
-      // Use --remux-video to convert container to MP4 without slow re-encoding.
+      // Facebook, Instagram, TikTok — prefer native MP4 to skip remux entirely.
+      // Only remux if the source container is not MP4.
       args.push(
-        '-f', `best[height<=${quality}][vcodec^=avc]/best[height<=${quality}]/best`,
+        '-f', `best[height<=${quality}][ext=mp4]/best[ext=mp4]/best[height<=${quality}][vcodec^=avc]/best[height<=${quality}]/best`,
         '-S', 'vcodec:h264,acodec:aac',
         '--remux-video', 'mp4',
       )
@@ -487,15 +492,16 @@ function getAudioQuality(quality) {
 }
 
 function getVideoQuality(quality) {
-  // Prefer H.264 (avc1) + AAC (mp4a) to avoid slow VP9→H.264 re-encoding when merging to MP4.
-  // Fallback chain: avc1+mp4a → avc1+any → any+any → single best stream.
-  const map = {
-    '360':  `bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]`,
-    '480':  `bestvideo[height<=480][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=480][vcodec^=avc1]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]`,
-    '720':  `bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=720][vcodec^=avc1]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]`,
-    '1080': `bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]`,
-    '1440': `bestvideo[height<=1440][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1440][vcodec^=avc1]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]`,
-    '2160': `bestvideo[height<=2160][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=2160][vcodec^=avc1]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]`,
+  // PERF: For ≤720p, YouTube has pre-muxed MP4 streams (video+audio in one file).
+  // Using these avoids downloading 2 separate streams + ffmpeg merge = MUCH faster.
+  // For 1080p+, pre-muxed is not available, so we need separate streams + merge.
+  const q = parseInt(quality)
+
+  if (q <= 720) {
+    // Pre-muxed first → then H.264 separate streams as fallback
+    return `best[height<=${quality}][ext=mp4]/bestvideo[height<=${quality}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
   }
-  return map[quality] || map['720']
+
+  // 1080p+: no pre-muxed available, use separate H.264+AAC streams
+  return `bestvideo[height<=${quality}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=${quality}][vcodec^=avc1]+bestaudio/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
 }
