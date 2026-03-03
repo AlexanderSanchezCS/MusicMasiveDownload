@@ -57,6 +57,41 @@ function cleanInstagramUrl(url) {
 }
 
 /**
+ * Resolve Facebook share/short URLs to their canonical form.
+ * facebook.com/share/r/xxx and facebook.com/share/v/xxx are redirects
+ * that yt-dlp can’t always follow. We resolve them first.
+ */
+async function resolveFacebookUrl(url) {
+  try {
+    const u = new URL(url)
+    // Only resolve share links
+    if (!u.hostname.includes('facebook') && !u.hostname.includes('fb.watch')) return url
+    if (!u.pathname.startsWith('/share/')) return url
+
+    // Use a HEAD request with redirect follow to get the real URL
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 10000)
+    const res = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      },
+    })
+    clearTimeout(timeout)
+    // The final URL after redirects is the canonical one
+    if (res.url && res.url !== url) {
+      console.log(`[facebook] Resolved share URL: ${url} -> ${res.url}`)
+      return res.url
+    }
+  } catch (e) {
+    console.error('[facebook] Could not resolve share URL:', e.message)
+  }
+  return url
+}
+
+/**
  * Map common Instagram yt-dlp errors to friendly messages.
  */
 function friendlyInstagramError(msg) {
@@ -224,6 +259,11 @@ export async function getVideoInfo(url, isPlaylist = false) {
     url = cleanInstagramUrl(url)
   }
 
+  // Resolve Facebook share/short URLs
+  if (platform === 'facebook') {
+    url = await resolveFacebookUrl(url)
+  }
+
   const args = [
     '--dump-json',
     '--no-warnings',
@@ -288,7 +328,14 @@ export async function getVideoInfo(url, isPlaylist = false) {
       const friendly = friendlyInstagramError(error.message)
       if (friendly) throw new Error(friendly)
     }
-    throw new Error(`Error al obtener info: ${error.message}`)
+    // Strip yt-dlp command details from error to avoid leaking internals
+    const msg = error.message || ''
+    if (msg.includes('Command failed') || msg.includes('ERROR:')) {
+      // Extract just the yt-dlp error line if present
+      const ytdlpError = msg.match(/ERROR:\s*(.+)/)?.[1]
+      throw new Error(ytdlpError || 'No se pudo obtener información del video. Verifica que el enlace sea correcto y el contenido sea público.')
+    }
+    throw new Error('No se pudo obtener información del video.')
   }
 }
 
@@ -330,6 +377,11 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
   // Clean Instagram URLs
   if (platform === 'instagram') {
     url = cleanInstagramUrl(url)
+  }
+
+  // Resolve Facebook share/short URLs
+  if (platform === 'facebook') {
+    url = await resolveFacebookUrl(url)
   }
 
   const args = ['--no-warnings', '--no-playlist']

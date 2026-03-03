@@ -41,7 +41,9 @@ app.use(helmet({
   hsts: { maxAge: 63072000, includeSubDomains: true, preload: true },
 }))
 
-// CORS — SECURITY: Restrict to known frontend origin; reject wildcard in production
+// CORS — Allow frontend origins (Vercel) to call Railway directly for downloads.
+// Set FRONTEND_URL in Railway env to your Vercel domain(s), comma-separated.
+// e.g. FRONTEND_URL=https://music-masive-download.vercel.app,https://music-masive-download-gfv7ttucw.vercel.app
 const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || '')
   .split(',')
   .map(o => o.trim())
@@ -50,13 +52,17 @@ const ALLOWED_ORIGINS = (process.env.FRONTEND_URL || '')
 app.use(cors({
   origin: ALLOWED_ORIGINS.length > 0
     ? (origin, cb) => {
-        // Allow requests with no origin (e.g. server-to-server, curl)
-        if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true)
+        // Allow requests with no origin (e.g. server-to-server, curl, Vercel rewrite proxy)
+        if (!origin) return cb(null, true)
+        // Allow exact match or *.vercel.app subdomains for preview deploys
+        if (ALLOWED_ORIGINS.includes(origin) || origin.endsWith('.vercel.app')) {
+          return cb(null, true)
+        }
         cb(new Error('Blocked by CORS'))
       }
     : '*', // fallback for local dev only
   methods: ['GET', 'POST'],
-  credentials: true,
+  credentials: false, // no cookies needed for download calls
   exposedHeaders: ['Content-Length', 'Content-Disposition'],
 }))
 

@@ -1,6 +1,12 @@
 import { create } from 'zustand'
 
+// API_URL for light requests (info, playlist) — goes through Vercel rewrite proxy
 const API_URL = import.meta.env.VITE_API_URL || ''
+
+// DOWNLOAD_URL for heavy requests (download) — goes DIRECTLY to Railway
+// Vercel Hobby plan has a ~30s timeout on rewrite proxies, which causes 502 on downloads.
+// By calling Railway directly for downloads, we bypass this limit entirely.
+const DOWNLOAD_API_URL = import.meta.env.VITE_DOWNLOAD_API_URL || 'https://music-masive-download-api-production.up.railway.app'
 
 // Max concurrent browser downloads — 3 keeps browser memory manageable
 // (3 concurrent × ~10MB avg MP3 = ~30MB RAM peak; for MP4 ~150MB peak)
@@ -35,6 +41,13 @@ function friendlyError(error) {
   }
   if (msg.includes('timeout') || msg.includes('Timeout')) {
     return 'La solicitud tardó demasiado. Inténtalo de nuevo.'
+  }
+  if (msg.includes('502') || msg.includes('503') || msg.includes('504')) {
+    return 'El servidor está ocupado o reiniciándose. Inténtalo en unos segundos.'
+  }
+  // Strip internal command details (e.g. "Command failed: yt-dlp ...")
+  if (msg.includes('Command failed') || msg.includes('yt-dlp') || msg.includes('ffmpeg')) {
+    return 'No se pudo procesar este enlace. Verifica que el video sea público y el link sea correcto.'
   }
   return msg || 'Error desconocido'
 }
@@ -205,16 +218,16 @@ const useStore = create((set, get) => ({
 
       if (!infoRes.ok) {
         const body = await infoRes.json().catch(() => ({}))
-        throw new Error(body.details || body.error || `Error ${infoRes.status} al obtener info`)
+        throw new Error(body.error || `Error ${infoRes.status} al obtener info`)
       }
 
       const info = await infoRes.json()
       updateDownload(id, { title: info.title, thumbnail: info.thumbnail, duration: info.duration, progress: 5 })
 
-      // 2. Start download – pass title so backend skips a second yt-dlp call
+      // 2. Start download – call Railway DIRECTLY to avoid Vercel's 30s proxy timeout
       updateDownload(id, { progress: 8 })
 
-      const downloadRes = await fetch(`${API_URL}/api/download`, {
+      const downloadRes = await fetch(`${DOWNLOAD_API_URL}/api/download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, format, quality, title: info.title })
@@ -222,7 +235,7 @@ const useStore = create((set, get) => ({
 
       if (!downloadRes.ok) {
         const body = await downloadRes.json().catch(() => ({}))
-        throw new Error(body.details || body.error || `Error ${downloadRes.status} en la descarga`)
+        throw new Error(body.error || `Error ${downloadRes.status} en la descarga`)
       }
 
       // 3. Stream the response with real progress
