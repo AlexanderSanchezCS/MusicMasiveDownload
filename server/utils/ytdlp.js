@@ -249,68 +249,6 @@ cleanupTempFiles()
 setInterval(cleanupTempFiles, CLEANUP_INTERVAL_MS)
 
 /**
- * Get the direct CDN download URL for a video (no disk I/O needed).
- * Used for streaming proxy: Railway fetches from CDN and pipes to client.
- * Returns { directUrl, platform } or null if not possible.
- *
- * Only works for MP4 single-stream cases:
- * - YouTube ≤720p (pre-muxed MP4 available)
- * - TikTok, Instagram, Facebook (single combined stream)
- *
- * Returns null for MP3 (needs ffmpeg) or YouTube 1080p+ (needs merge).
- */
-export async function getDirectUrl(url, format = 'mp4', quality = '720') {
-  if (format !== 'mp4') return null
-
-  const platform = detectPlatform(url)
-
-  // YouTube 1080p+ has separate video+audio streams that need merging
-  if (platform === 'youtube' && parseInt(quality) > 720) return null
-
-  // Clean URLs
-  if (platform === 'instagram') url = cleanInstagramUrl(url)
-  if (platform === 'facebook') url = await resolveFacebookUrl(url)
-
-  // -g = print direct URL only (no download, very fast ~2-3s)
-  const args = ['--no-warnings', '--no-playlist', '--no-check-formats', '-g']
-
-  if (platform === 'instagram') args.push(...getInstagramArgs())
-
-  if (platform === 'youtube') {
-    args.push('-f', `best[height<=${quality}][ext=mp4]/best[ext=mp4]`)
-  } else {
-    args.push(
-      '-f', `best[height<=${quality}][ext=mp4]/best[ext=mp4]/best[height<=${quality}]/best`,
-      '-S', 'vcodec:h264,acodec:aac',
-    )
-  }
-
-  args.push(url)
-
-  try {
-    const execFn = platform === 'instagram'
-      ? () => execWithRetry(args, { timeout: 30000, maxBuffer: 1024 * 1024 })
-      : () => execFileAsync(YTDLP_PATH, args, { timeout: 30000, maxBuffer: 1024 * 1024 })
-
-    const { stdout } = await execFn()
-    const lines = stdout.trim().split('\n').filter(l => l.startsWith('http'))
-
-    // Single URL = single stream, can stream directly
-    // Multiple URLs = separate video+audio, need merge → can't stream
-    if (lines.length === 1) {
-      console.log(`[direct-url] Got CDN URL for ${platform} (${quality}p)`)
-      return { directUrl: lines[0], platform }
-    }
-
-    console.log(`[direct-url] Got ${lines.length} URLs (needs merge), falling back to disk`)
-    return null
-  } catch (e) {
-    console.error('[direct-url] Failed:', e.message)
-    return null
-  }
-}
-
-/**
  * Get video information from a supported URL
  */
 export async function getVideoInfo(url, isPlaylist = false) {
@@ -416,6 +354,61 @@ function detectPlatform(url) {
 }
 
 /**
+ * Get a direct media URL without downloading to disk.
+ * Used by /api/download fast-path streaming proxy for MP4.
+ */
+export async function getDirectUrl(url, format = 'mp4', quality = '720') {
+  if (format !== 'mp4') return null
+
+  const platform = detectPlatform(url)
+
+  if (platform === 'instagram') {
+    url = cleanInstagramUrl(url)
+  }
+
+  if (platform === 'facebook') {
+    url = await resolveFacebookUrl(url)
+  }
+
+  const args = ['-g', '--no-warnings', '--no-playlist']
+
+  if (platform === 'instagram') {
+    args.push(...getInstagramArgs())
+  }
+
+  if (platform === 'youtube') {
+    args.push('-f', `best[height<=${quality}][ext=mp4]/best[height<=${quality}]/best`)
+  } else {
+    args.push('-f', `best[height<=${quality}]/best`)
+  }
+
+  args.push(url)
+
+  const execOpts = {
+    timeout: 45000,
+    maxBuffer: 1024 * 1024,
+  }
+
+  try {
+    const execFn = platform === 'instagram'
+      ? () => execWithRetry(args, execOpts)
+      : () => execFileAsync(YTDLP_PATH, args, execOpts)
+
+    const { stdout } = await execFn()
+    const directUrl = stdout
+      .split('\n')
+      .map(line => line.trim())
+      .find(line => line.startsWith('http'))
+
+    if (!directUrl) return null
+
+    return { directUrl }
+  } catch (error) {
+    return null
+  }
+}
+
+/**
  * Download media from a supported URL.
  * Accepts an optional `title` so the caller can pass the title obtained
  * from /api/info, avoiding a second yt-dlp call just to get the title.
@@ -448,9 +441,6 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
 
   const args = ['--no-warnings', '--no-playlist']
 
-  // PERF: Skip format URL verification — saves 1-3 seconds per download
-  args.push('--no-check-formats')
-
   // Add ffmpeg location if available locally
   if (HAS_LOCAL_FFMPEG) {
     args.push('--ffmpeg-location', FFMPEG_DIR)
@@ -481,13 +471,11 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
         '-f', videoQuality,
         '--merge-output-format', 'mp4',
       )
-      // PERF: Download multiple fragments in parallel for faster downloads
-      args.push('--concurrent-fragments', '4')
     } else {
-      // Facebook, Instagram, TikTok — prefer native MP4 to skip remux entirely.
-      // Only remux if the source container is not MP4.
+      // Facebook, Instagram, TikTok — prefer H.264 for MP4 compatibility.
+      // Use --remux-video to convert container to MP4 without slow re-encoding.
       args.push(
-        '-f', `best[height<=${quality}][ext=mp4]/best[ext=mp4]/best[height<=${quality}][vcodec^=avc]/best[height<=${quality}]/best`,
+        '-f', `best[height<=${quality}][vcodec^=avc]/best[height<=${quality}]/best`,
         '-S', 'vcodec:h264,acodec:aac',
         '--remux-video', 'mp4',
       )
@@ -554,16 +542,15 @@ function getAudioQuality(quality) {
 }
 
 function getVideoQuality(quality) {
-  // PERF: For ≤720p, YouTube has pre-muxed MP4 streams (video+audio in one file).
-  // Using these avoids downloading 2 separate streams + ffmpeg merge = MUCH faster.
-  // For 1080p+, pre-muxed is not available, so we need separate streams + merge.
-  const q = parseInt(quality)
-
-  if (q <= 720) {
-    // Pre-muxed first → then H.264 separate streams as fallback
-    return `best[height<=${quality}][ext=mp4]/bestvideo[height<=${quality}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
+  // Prefer H.264 (avc1) + AAC (mp4a) to avoid slow VP9→H.264 re-encoding when merging to MP4.
+  // Fallback chain: avc1+mp4a → avc1+any → any+any → single best stream.
+  const map = {
+    '360':  `bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]`,
+    '480':  `bestvideo[height<=480][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=480][vcodec^=avc1]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]`,
+    '720':  `bestvideo[height<=720][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=720][vcodec^=avc1]+bestaudio/bestvideo[height<=720]+bestaudio/best[height<=720]`,
+    '1080': `bestvideo[height<=1080][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1080][vcodec^=avc1]+bestaudio/bestvideo[height<=1080]+bestaudio/best[height<=1080]`,
+    '1440': `bestvideo[height<=1440][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=1440][vcodec^=avc1]+bestaudio/bestvideo[height<=1440]+bestaudio/best[height<=1440]`,
+    '2160': `bestvideo[height<=2160][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=2160][vcodec^=avc1]+bestaudio/bestvideo[height<=2160]+bestaudio/best[height<=2160]`,
   }
-
-  // 1080p+: no pre-muxed available, use separate H.264+AAC streams
-  return `bestvideo[height<=${quality}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=${quality}][vcodec^=avc1]+bestaudio/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
+  return map[quality] || map['720']
 }

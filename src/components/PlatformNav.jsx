@@ -1,19 +1,22 @@
 import { motion } from 'framer-motion'
-import { FaYoutube, FaFacebook, FaInstagram, FaTiktok } from 'react-icons/fa'
+import { FaYoutube, FaFacebook, FaInstagram, FaTiktok, FaGlobe } from 'react-icons/fa'
 import useStore, { PLATFORMS } from '../store/useStore'
 
 const ICON_MAP = {
+  FaGlobe: FaGlobe,
   FaYoutube: FaYoutube,
   FaFacebook: FaFacebook,
   FaInstagram: FaInstagram,
   FaTiktok: FaTiktok,
 }
 
+const allTab = { id: 'all', label: 'Todas', icon: 'FaGlobe', color: '#dc2626' }
+
 export default function PlatformNav() {
   const activePlatform = useStore((s) => s.activePlatform)
   const setActivePlatform = useStore((s) => s.setActivePlatform)
 
-  const tabs = PLATFORMS
+  const tabs = [allTab, ...PLATFORMS]
 
   return (
     <nav

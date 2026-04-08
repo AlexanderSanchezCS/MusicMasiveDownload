@@ -1,12 +1,11 @@
 import { create } from 'zustand'
 
-// API_URL for light requests (info, playlist) — goes through Vercel rewrite proxy
-const API_URL = import.meta.env.VITE_API_URL || ''
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
+const DOWNLOAD_BASE_URL = (import.meta.env.VITE_DOWNLOAD_API_URL || API_BASE_URL).replace(/\/$/, '')
 
-// DOWNLOAD_URL for heavy requests (download) — goes DIRECTLY to Railway
-// Vercel Hobby plan has a ~30s timeout on rewrite proxies, which causes 502 on downloads.
-// By calling Railway directly for downloads, we bypass this limit entirely.
-const DOWNLOAD_API_URL = import.meta.env.VITE_DOWNLOAD_API_URL || 'https://music-masive-download-api-production.up.railway.app'
+function buildApiUrl(baseUrl, path) {
+  return baseUrl ? `${baseUrl}/api/${path}` : `/api/${path}`
+}
 
 // Max concurrent browser downloads — 3 keeps browser memory manageable
 // (3 concurrent × ~10MB avg MP3 = ~30MB RAM peak; for MP4 ~150MB peak)
@@ -184,9 +183,9 @@ const useStore = create((set, get) => ({
   showHistory: false,
   setShowHistory: (v) => set({ showHistory: v }),
 
-  // Active platform filter — filters URLs to only accept selected platform
-  activePlatform: 'youtube',
-  setActivePlatform: (p) => set({ activePlatform: p, urls: '' }),
+  // Active platform filter
+  activePlatform: 'all',
+  setActivePlatform: (p) => set({ activePlatform: p }),
 
   // Parse URLs from text — filters by active platform
   parseUrls: () => {
@@ -198,7 +197,7 @@ const useStore = create((set, get) => ({
   // ---------- Playlist resolution ----------
   resolvePlaylist: async (playlistUrl) => {
     try {
-      const res = await fetch(`${API_URL}/api/playlist`, {
+      const res = await fetch(buildApiUrl(API_BASE_URL, 'playlist'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: playlistUrl })
@@ -225,7 +224,7 @@ const useStore = create((set, get) => ({
       // 1. Get info  →  progress 0 → 5 %
       updateDownload(id, { progress: 2 })
 
-      const infoRes = await fetch(`${API_URL}/api/info`, {
+      const infoRes = await fetch(buildApiUrl(API_BASE_URL, 'info'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url })
@@ -239,10 +238,10 @@ const useStore = create((set, get) => ({
       const info = await infoRes.json()
       updateDownload(id, { title: info.title, thumbnail: info.thumbnail, duration: info.duration, progress: 5 })
 
-      // 2. Start download – call Railway DIRECTLY to avoid Vercel's 30s proxy timeout
+      // 2. Start download
       updateDownload(id, { progress: 8 })
 
-      const downloadRes = await fetch(`${DOWNLOAD_API_URL}/api/download`, {
+      const downloadRes = await fetch(buildApiUrl(DOWNLOAD_BASE_URL, 'download'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, format, quality, title: info.title })
