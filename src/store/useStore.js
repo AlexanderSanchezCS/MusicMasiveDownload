@@ -32,6 +32,9 @@ const ALL_HOSTS = PLATFORMS.flatMap(p => p.hosts)
  */
 function friendlyError(error) {
   const msg = error?.message || ''
+  if (msg.includes('Application not found') || msg.includes('backend-unavailable')) {
+    return 'El backend de descargas no está disponible en este momento. Verifica la URL del backend en Vercel (VITE_API_URL / VITE_DOWNLOAD_API_URL) y que Railway esté activo.'
+  }
   if (msg === 'Failed to fetch' || msg === 'NetworkError when attempting to fetch resource.') {
     return 'No se pudo conectar con el servidor. Verifica tu conexión o inténtalo más tarde.'
   }
@@ -49,6 +52,15 @@ function friendlyError(error) {
     return 'No se pudo procesar este enlace. Verifica que el video sea público y el link sea correcto.'
   }
   return msg || 'Error desconocido'
+}
+
+async function parseApiError(response, fallbackMessage) {
+  const body = await response.json().catch(() => ({}))
+  const message = body?.message || body?.error || fallbackMessage
+  if (typeof message === 'string' && message.includes('Application not found')) {
+    throw new Error('backend-unavailable')
+  }
+  throw new Error(message)
 }
 
 /**
@@ -203,8 +215,7 @@ const useStore = create((set, get) => ({
         body: JSON.stringify({ url: playlistUrl })
       })
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.error || `Error ${res.status}`)
+        await parseApiError(res, `Error ${res.status}`)
       }
       const data = await res.json()
       if (data.type === 'playlist' && data.videos?.length) {
@@ -231,8 +242,7 @@ const useStore = create((set, get) => ({
       })
 
       if (!infoRes.ok) {
-        const body = await infoRes.json().catch(() => ({}))
-        throw new Error(body.error || `Error ${infoRes.status} al obtener info`)
+        await parseApiError(infoRes, `Error ${infoRes.status} al obtener info`)
       }
 
       const info = await infoRes.json()
@@ -248,8 +258,7 @@ const useStore = create((set, get) => ({
       })
 
       if (!downloadRes.ok) {
-        const body = await downloadRes.json().catch(() => ({}))
-        throw new Error(body.error || `Error ${downloadRes.status} en la descarga`)
+        await parseApiError(downloadRes, `Error ${downloadRes.status} en la descarga`)
       }
 
       // 3. Stream the response with real progress

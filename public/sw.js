@@ -1,4 +1,4 @@
-const CACHE_NAME = 'musicdl-v2'
+const CACHE_NAME = 'musicdl-v3'
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -47,6 +47,22 @@ self.addEventListener('fetch', (event) => {
 
   // Never cache API calls, download streams, or non-GET requests
   if (request.url.includes('/api/') || request.method !== 'GET') {
+    return
+  }
+
+  // Always prefer fresh app shell to avoid stale UI after deploys
+  if (request.mode === 'navigate' || request.url.endsWith('/index.html')) {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.ok && response.type === 'basic') {
+            const clone = response.clone()
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, clone))
+          }
+          return response
+        })
+        .catch(() => caches.match(request))
+    )
     return
   }
 
