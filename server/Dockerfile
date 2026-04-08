@@ -15,8 +15,10 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install --production
 
-# Copy server code
-COPY . .
+# Copy only necessary server files
+COPY index.js ./
+COPY routes/ ./routes/
+COPY utils/ ./utils/
 
 # Expose port
 EXPOSE 4000
