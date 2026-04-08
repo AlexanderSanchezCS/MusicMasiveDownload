@@ -20,6 +20,11 @@ const app = express()
 app.set('trust proxy', 1)
 const PORT = process.env.PORT || 4000
 
+// Force redeploy 2026-04-08
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`)
+})
+
 // Security headers via Helmet
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -138,9 +143,4 @@ app.use((err, req, res, next) => {
     error: 'Error interno del servidor',
     ...(process.env.NODE_ENV === 'development' && { message: err.message }),
   })
-})
-
-app.listen(PORT, () => {
-  console.log(`🎵 MusicMasiveDownload Server running on port ${PORT}`)
-  console.log(`   Health: http://localhost:${PORT}/api/health`)
 })
