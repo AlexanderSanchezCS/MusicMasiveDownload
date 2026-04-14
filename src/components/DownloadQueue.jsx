@@ -116,17 +116,13 @@ export default memo(function DownloadQueue() {
   const downloads = useStore((s) => s.downloads)
   const clearDownloads = useStore((s) => s.clearDownloads)
 
-  if (!downloads || downloads.length === 0) return null
+  if (downloads.length === 0) return null
 
-  // ✅ FIX 1 — Safe useMemo with optional chaining to prevent React #310
-  // Prevents crash when downloads array mutates during async state updates
-  const { completed, errorCount } = useMemo(() => {
-    const list = Array.isArray(downloads) ? downloads : []
-    return {
-      completed: list.filter(d => d?.status === 'completed').length,
-      errorCount: list.filter(d => d?.status === 'error').length,
-    }
-  }, [downloads])
+  // PERF: Memoize stats to avoid recalculation
+  const { completed, errorCount } = useMemo(() => ({
+    completed: downloads.filter(d => d.status === 'completed').length,
+    errorCount: downloads.filter(d => d.status === 'error').length,
+  }), [downloads])
 
   return (
     <motion.div
@@ -161,12 +157,12 @@ export default memo(function DownloadQueue() {
       <div className="mb-6">
         <div className="flex justify-between text-xs text-gray-500 mb-2">
           <span>Progreso general</span>
-          <span>{downloads.length > 0 ? Math.round((completed / downloads.length) * 100) : 0}%</span>
+          <span>{Math.round((completed / downloads.length) * 100)}%</span>
         </div>
         <div className="w-full h-2 bg-gray-800 rounded-full overflow-hidden">
           <motion.div
             initial={{ width: 0 }}
-            animate={{ width: `${downloads.length > 0 ? (completed / downloads.length) * 100 : 0}%` }}
+            animate={{ width: `${(completed / downloads.length) * 100}%` }}
             className="h-full bg-gradient-to-r from-red-600 to-red-500 rounded-full"
           />
         </div>
