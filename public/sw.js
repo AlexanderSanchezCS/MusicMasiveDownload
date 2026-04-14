@@ -1,5 +1,5 @@
-// PERF: Cache version — bump this on every deployment to force refresh
-const CACHE_VERSION = 'v4'
+// PERF: Auto-bump cache version on every SW update to force full refresh
+const CACHE_VERSION = 'v' + Date.now()
 const CACHE_NAME = `musicdl-${CACHE_VERSION}`
 
 const STATIC_ASSETS = [
@@ -18,14 +18,14 @@ self.addEventListener('install', (event) => {
   self.skipWaiting()
 })
 
-// Activate: clean old caches + force new SW to take over immediately
-self.addEventListener('activate', (event) => {
+// Activate: nuke ALL old caches and force new SW to take over immediately
+self.addEventListener('activate', event => {
   event.waitUntil(
-    caches.keys().then((keys) =>
+    caches.keys().then(keys =>
       Promise.all(
         keys
-          .filter((k) => k !== CACHE_NAME)
-          .map((k) => caches.delete(k))
+          .filter(key => key !== CACHE_NAME)
+          .map(key => caches.delete(key))
       )
     ).then(() => self.clients.claim())
   )
