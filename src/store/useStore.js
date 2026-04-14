@@ -285,6 +285,11 @@ const useStore = create((set, get) => ({
         ? contentLength
         : estimateFileSize(info.duration, format, quality)
 
+      // ✅ FIX B — Guard against null body (prevents TypeError crash)
+      if (!downloadRes.body) {
+        throw new Error('El servidor no envió el archivo. Inténtalo de nuevo.')
+      }
+
       const reader = downloadRes.body.getReader()
       const chunks = []
       let received = 0
@@ -308,8 +313,8 @@ const useStore = create((set, get) => ({
         updateDownload(id, { progress: Math.min(pct, PROGRESS_END) })
       }
 
-      // ✅ FIX 2 — Validate download integrity before building Blob
-      const MIN_EXPECTED_BYTES = format === 'mp3' ? 50000 : 200000
+      // ✅ FIX 2 — Validate download integrity (permissive thresholds to avoid false positives)
+      const MIN_EXPECTED_BYTES = format === 'mp3' ? 1000 : 5000
       if (received < MIN_EXPECTED_BYTES) {
         throw new Error('La descarga fue incompleta. Inténtalo de nuevo.')
       }
