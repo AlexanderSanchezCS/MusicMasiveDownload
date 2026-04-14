@@ -1,6 +1,7 @@
+import { memo } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 
-export default function BackgroundEffects() {
+export default memo(function BackgroundEffects() {
   // PERF: respect user's prefers-reduced-motion setting
   const shouldReduceMotion = useReducedMotion()
 
@@ -50,28 +51,18 @@ export default function BackgroundEffects() {
       {/* Top gradient line */}
       <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-red-500/20 to-transparent" />
 
-      {/* Floating particles — PERF: use will-change to hint GPU compositing */}
+      {/* ✅ FIX 8 — CSS-only floating particles (no Framer Motion overhead) */}
       {[...Array(6)].map((_, i) => (
-        <motion.div
+        <div
           key={i}
           className="absolute w-1 h-1 bg-red-500/20 rounded-full"
           style={{
             left: `${15 + i * 15}%`,
             top: `${20 + (i % 3) * 25}%`,
-            willChange: 'transform, opacity',
-          }}
-          animate={{
-            y: [0, -30, 0],
-            opacity: [0.2, 0.5, 0.2],
-          }}
-          transition={{
-            duration: 4 + i * 0.5,
-            repeat: Infinity,
-            delay: i * 0.8,
-            ease: 'easeInOut',
+            animation: `float-particle ${4 + i * 0.5}s ease-in-out ${i * 0.8}s infinite`,
           }}
         />
       ))}
     </div>
   )
-}
+})

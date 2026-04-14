@@ -19,6 +19,7 @@ const SUPPORTED_HOSTS = [
   'tiktok.com', 'www.tiktok.com', 'vm.tiktok.com',
 ]
 
+// ─── Shared Validation ───────────────────────────────────────────────────
 function isValidUrl(url) {
   if (!url || typeof url !== 'string' || url.length > MAX_URL_LENGTH) return false
   try {
@@ -30,142 +31,158 @@ function isValidUrl(url) {
   }
 }
 
-/**
- * Sanitize a title string for use in filenames / Content-Disposition.
- * Removes control characters, path separators, and trims.
- */
 function sanitizeTitle(raw) {
   if (!raw || typeof raw !== 'string') return 'download'
   return raw
-    .replace(/[\x00-\x1f\x7f]/g, '')     // control chars
-    .replace(/[\/\\:*?"<>|]/g, '_')       // filesystem-unsafe chars
-    .replace(/\s+/g, ' ')                 // collapse whitespace
+    .replace(/[\x00-\x1f\x7f]/g, '')
+    .replace(/[\/\\:*?"<>|]/g, '_')
+    .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 200)                         // cap length
+    .slice(0, 200)
     || 'download'
 }
 
-/**
- * POST /api/info
- * Get video information from a supported URL
- */
-router.post('/info', async (req, res) => {
+// ─── Shared POST handler for /info ───────────────────────────────────────
+async function handleInfo(req, res) {
+  const incomingUrl = req.body?.url
+
+  // Debug logging
+  console.log(`[POST /api/info] Incoming URL: ${incomingUrl || '(missing)'}`)
+
+  if (!incomingUrl) {
+    console.warn('[POST /api/info] 400 — URL is required')
+    return res.status(400).json({ error: 'URL is required' })
+  }
+
+  if (!isValidUrl(incomingUrl)) {
+    console.warn(`[POST /api/info] 400 — Invalid URL: ${incomingUrl.slice(0, 80)}`)
+    return res.status(400).json({ error: 'URL no válida. Plataformas soportadas: YouTube, Facebook, Instagram, TikTok.' })
+  }
+
   try {
-    const { url } = req.body
-
-    if (!url) {
-      return res.status(400).json({ error: 'URL es requerida' })
-    }
-
-    if (!isValidUrl(url)) {
-      return res.status(400).json({ error: 'URL no válida. Plataformas soportadas: YouTube, Facebook, Instagram, TikTok.' })
-    }
-
-    const info = await getVideoInfo(url)
+    const info = await getVideoInfo(incomingUrl)
+    console.log(`[POST /api/info] 200 — "${info.title || 'unknown'}" (${info.duration}s)`)
+    // ✅ FIX 6 — HTTP cache headers to reduce redundant requests
+    res.set('Cache-Control', 'public, max-age=180, stale-while-revalidate=30')
+    res.set('ETag', `"${Buffer.from(incomingUrl).toString('base64url')}"`)
     res.json(info)
   } catch (error) {
-    console.error('Info error:', error.message)
-    res.status(500).json({ error: 'No se pudo obtener información del video' })
+    console.error('[POST /api/info] 500 —', error.message)
+    // Dev mode: include stack trace
+    const isDev = process.env.NODE_ENV === 'development'
+    res.status(500).json({
+      error: 'No se pudo obtener información del video',
+      ...(isDev && { message: error.message, stack: error.stack }),
+    })
   }
-})
+}
 
-/**
- * POST /api/download
- * Download media from a supported URL.
- */
-router.post('/download', async (req, res) => {
-  try {
-    const { url, format = 'mp3', quality = '192', title = '' } = req.body
+// ─── Shared POST handler for /download ───────────────────────────────────
+async function handleDownload(req, res) {
+  const { url, format = 'mp3', quality = '192', title = '' } = req.body || {}
 
-    if (!url) {
-      return res.status(400).json({ error: 'URL es requerida' })
-    }
+  // Debug logging
+  console.log(`[POST /api/download] Incoming: url=${url || '(missing)'}, format=${format}, quality=${quality}, title=${title || '(auto)'}`)
 
-    if (!isValidUrl(url)) {
-      return res.status(400).json({ error: 'URL no válida. Plataformas soportadas: YouTube, Facebook, Instagram, TikTok.' })
-    }
+  if (!url) {
+    console.warn('[POST /api/download] 400 — URL is required')
+    return res.status(400).json({ error: 'URL is required' })
+  }
 
-    if (!['mp3', 'mp4'].includes(format)) {
-      return res.status(400).json({ error: 'Formato no soportado. Usa mp3 o mp4.' })
-    }
+  if (!isValidUrl(url)) {
+    console.warn(`[POST /api/download] 400 — Invalid URL: ${url.slice(0, 80)}`)
+    return res.status(400).json({ error: 'URL no válida. Plataformas soportadas: YouTube, Facebook, Instagram, TikTok.' })
+  }
 
-    // SECURITY: Validate quality to prevent injection into yt-dlp arguments
-    const allowedQualities = format === 'mp3' ? ALLOWED_AUDIO_QUALITIES : ALLOWED_VIDEO_QUALITIES
-    const safeQuality = allowedQualities.includes(quality) ? quality : (format === 'mp3' ? '192' : '720')
+  if (!['mp3', 'mp4'].includes(format)) {
+    console.warn(`[POST /api/download] 400 — Invalid format: ${format}`)
+    return res.status(400).json({ error: 'Formato no soportado. Usa mp3 o mp4.' })
+  }
 
-    // Sanitize title for Content-Disposition
-    const safeTitle = sanitizeTitle(title)
+  // SECURITY: Validate quality
+  const allowedQualities = format === 'mp3' ? ALLOWED_AUDIO_QUALITIES : ALLOWED_VIDEO_QUALITIES
+  const safeQuality = allowedQualities.includes(quality) ? quality : (format === 'mp3' ? '192' : '720')
+  const safeTitle = sanitizeTitle(title)
 
-    // --- FAST PATH: Streaming proxy for MP4 ---
-    // Gets the direct CDN URL (~2s) and streams it to the client.
-    // No disk I/O on Railway = much faster for TikTok, IG, FB, YouTube ≤720p.
-    if (format === 'mp4') {
-      try {
-        const result = await getDirectUrl(url, format, safeQuality)
-        if (result) {
-          const { directUrl } = result
-          const controller = new AbortController()
-          const fetchTimeout = setTimeout(() => controller.abort(), 300000)
+  // ─── FAST PATH: Streaming proxy for MP4 ─────────────────────────────
+  if (format === 'mp4') {
+    try {
+      console.log(`[POST /api/download] Attempting stream proxy for MP4...`)
+      const result = await getDirectUrl(url, format, safeQuality)
+      if (result) {
+        const { directUrl } = result
+        const controller = new AbortController()
+        const fetchTimeout = setTimeout(() => controller.abort(), 300000)
 
-          const cdnRes = await fetch(directUrl, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            },
-            signal: controller.signal,
+        const cdnRes = await fetch(directUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          },
+          signal: controller.signal,
+        })
+
+        if (cdnRes.ok && cdnRes.body) {
+          const contentLength = cdnRes.headers.get('content-length')
+          if (contentLength) res.setHeader('Content-Length', contentLength)
+          const mp4Filename = `${safeTitle}.mp4`
+          res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(mp4Filename)}"; filename*=UTF-8''${encodeURIComponent(mp4Filename)}`)
+          res.setHeader('Content-Type', 'video/mp4')
+          res.setHeader('X-Content-Type-Options', 'nosniff')
+
+          console.log(`[POST /api/download] 200 — Streaming MP4: "${mp4Filename}"`)
+
+          const nodeStream = Readable.fromWeb(cdnRes.body)
+
+          // ✅ FIX 3 — Register error/close handlers BEFORE pipe to ensure proper cleanup
+          nodeStream.on('error', (err) => {
+            clearTimeout(fetchTimeout)
+            console.error('[stream-proxy] Stream error:', err.message)
+            if (!res.headersSent) res.status(500).json({ error: 'Error en streaming' })
           })
 
-          if (cdnRes.ok && cdnRes.body) {
-            const contentLength = cdnRes.headers.get('content-length')
-            if (contentLength) res.setHeader('Content-Length', contentLength)
-            const mp4Filename = `${safeTitle}.mp4`
-            res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(mp4Filename)}"; filename*=UTF-8''${encodeURIComponent(mp4Filename)}`)
-            res.setHeader('Content-Type', 'video/mp4')
-            res.setHeader('X-Content-Type-Options', 'nosniff')
+          req.on('close', () => {
+            clearTimeout(fetchTimeout)
+            if (!res.writableFinished) {
+              nodeStream.destroy()
+              controller.abort()
+            }
+          })
 
-            const nodeStream = Readable.fromWeb(cdnRes.body)
-            nodeStream.pipe(res)
+          res.on('finish', () => {
+            clearTimeout(fetchTimeout)
+            nodeStream.destroy() // ✅ Ensure source stream is always destroyed
+            console.log(`[stream-proxy] Finished: "${mp4Filename}"`)
+          })
 
-            nodeStream.on('error', (err) => {
-              clearTimeout(fetchTimeout)
-              console.error('[stream-proxy] Stream error:', err.message)
-              if (!res.headersSent) res.status(500).json({ error: 'Error en streaming' })
-            })
-
-            req.on('close', () => {
-              clearTimeout(fetchTimeout)
-              if (!res.writableFinished) {
-                nodeStream.destroy()
-                controller.abort()
-              }
-            })
-
-            res.on('finish', () => clearTimeout(fetchTimeout))
-            return // Streaming in progress — done
-          }
-          clearTimeout(fetchTimeout)
+          nodeStream.pipe(res)
+          return
         }
-      } catch (streamErr) {
-        console.log('[stream-proxy] Falling back to disk download:', streamErr.message)
+        clearTimeout(fetchTimeout)
+        console.log('[stream-proxy] CDN response not ok, falling back to disk')
+      } else {
+        console.log('[stream-proxy] getDirectUrl returned null, falling back to disk')
       }
+    } catch (streamErr) {
+      console.log('[stream-proxy] Falling back to disk download:', streamErr.message)
     }
+  }
 
-    // --- FALLBACK: Disk-based download (MP3, YouTube 1080p+, failed stream) ---
+  // ─── FALLBACK: Disk-based download ──────────────────────────────────
+  try {
     const { filePath, filename, mimeType } = await downloadMedia(url, format, safeQuality, safeTitle)
 
-    // Send Content-Length so the client can compute real download progress
     const { statSync } = await import('fs')
     const stat = statSync(filePath)
     res.setHeader('Content-Length', stat.size)
-    // SECURITY: use RFC 5987 encoding for Content-Disposition filename
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"; filename*=UTF-8''${encodeURIComponent(filename)}`)
     res.setHeader('Content-Type', mimeType)
-    // SECURITY: Prevent browsers from MIME-sniffing
     res.setHeader('X-Content-Type-Options', 'nosniff')
+
+    console.log(`[POST /api/download] 200 — Sending file: "${filename}" (${Math.round(stat.size / 1024 / 1024)}MB)`)
 
     const { createReadStream } = await import('fs')
     const stream = createReadStream(filePath)
 
-    // Cleanup helper
     const cleanup = async () => {
       try {
         const { unlink } = await import('fs/promises')
@@ -176,7 +193,6 @@ router.post('/download', async (req, res) => {
     }
 
     stream.pipe(res)
-
     stream.on('end', cleanup)
 
     req.on('close', () => {
@@ -194,36 +210,81 @@ router.post('/download', async (req, res) => {
       }
     })
   } catch (error) {
-    console.error('Download error:', error.message)
+    console.error('[POST /api/download] 500 —', error.message)
+    const isDev = process.env.NODE_ENV === 'development'
     if (!res.headersSent) {
-      res.status(500).json({ error: 'Error en la descarga' })
+      res.status(500).json({
+        error: 'Error en la descarga',
+        ...(isDev && { message: error.message, stack: error.stack }),
+      })
     }
   }
-})
+}
 
-/**
- * POST /api/playlist
- * Get playlist information (YouTube only)
- */
-router.post('/playlist', async (req, res) => {
+// ─── Shared POST handler for /playlist ───────────────────────────────────
+async function handlePlaylist(req, res) {
+  const incomingUrl = req.body?.url
+
+  console.log(`[POST /api/playlist] Incoming URL: ${incomingUrl || '(missing)'}`)
+
+  if (!incomingUrl) {
+    console.warn('[POST /api/playlist] 400 — URL is required')
+    return res.status(400).json({ error: 'URL is required' })
+  }
+
+  if (!isValidUrl(incomingUrl)) {
+    console.warn(`[POST /api/playlist] 400 — Invalid URL: ${incomingUrl.slice(0, 80)}`)
+    return res.status(400).json({ error: 'URL no válida. Plataformas soportadas: YouTube, Facebook, Instagram, TikTok.' })
+  }
+
   try {
-    const { url } = req.body
-
-    if (!url) {
-      return res.status(400).json({ error: 'URL es requerida' })
-    }
-
-    // SECURITY: Validate playlist URL same as other endpoints
-    if (!isValidUrl(url)) {
-      return res.status(400).json({ error: 'URL no válida. Plataformas soportadas: YouTube, Facebook, Instagram, TikTok.' })
-    }
-
-    const info = await getVideoInfo(url, true)
+    const info = await getVideoInfo(incomingUrl, true)
+    console.log(`[POST /api/playlist] 200 — ${info.count || 0} videos`)
     res.json(info)
   } catch (error) {
-    console.error('Playlist error:', error.message)
-    res.status(500).json({ error: 'No se pudo obtener la playlist' })
+    console.error('[POST /api/playlist] 500 —', error.message)
+    const isDev = process.env.NODE_ENV === 'development'
+    res.status(500).json({
+      error: 'No se pudo obtener la playlist',
+      ...(isDev && { message: error.message, stack: error.stack }),
+    })
   }
-})
+}
+
+// ─── POST Routes (primary) ──────────────────────────────────────────────
+router.post('/info', handleInfo)
+router.post('/download', handleDownload)
+router.post('/playlist', handlePlaylist)
+
+// ─── GET Routes (compatibility / debugging only) ────────────────────────
+// These delegate to the same handlers by wrapping req.query into req.body.
+// Only enabled when NODE_ENV !== 'production' to prevent accidental abuse.
+// Set ENABLE_GET_COMPATIBILITY=1 to enable in production if needed.
+
+const enableGetCompat = process.env.NODE_ENV !== 'production' || process.env.ENABLE_GET_COMPATIBILITY === '1'
+
+if (enableGetCompat) {
+  console.log('[compat] GET endpoints enabled for /info, /download, /playlist')
+
+  router.get('/info', (req, res) => {
+    console.log(`[GET /api/info] Debug mode — query URL: ${req.query.url || '(missing)'}`)
+    req.body = { url: req.query.url }
+    return handleInfo(req, res)
+  })
+
+  router.get('/download', (req, res) => {
+    console.log(`[GET /api/download] Debug mode — query: url=${req.query.url}, format=${req.query.format}, quality=${req.query.quality}`)
+    req.body = { url: req.query.url, format: req.query.format || 'mp3', quality: req.query.quality || '192', title: req.query.title || '' }
+    return handleDownload(req, res)
+  })
+
+  router.get('/playlist', (req, res) => {
+    console.log(`[GET /api/playlist] Debug mode — query URL: ${req.query.url || '(missing)'}`)
+    req.body = { url: req.query.url }
+    return handlePlaylist(req, res)
+  })
+} else {
+  console.log('[compat] GET endpoints disabled (production mode)')
+}
 
 export default router

@@ -1,14 +1,14 @@
-const CACHE_NAME = 'musicdl-v3'
+// PERF: Cache version — bump this on every deployment to force refresh
+const CACHE_VERSION = 'v4'
+const CACHE_NAME = `musicdl-${CACHE_VERSION}`
+
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
 ]
 
-// PERF: Cap cached entries to prevent unbounded storage growth
 const MAX_CACHED_ENTRIES = 50
-// Cache TTL for non-immutable assets (24 hours)
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
 // Install: cache shell
 self.addEventListener('install', (event) => {
@@ -18,19 +18,19 @@ self.addEventListener('install', (event) => {
   self.skipWaiting()
 })
 
-// Activate: clean old caches
+// Activate: clean old caches + force new SW to take over immediately
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
+      Promise.all(
+        keys
+          .filter((k) => k !== CACHE_NAME)
+          .map((k) => caches.delete(k))
+      )
+    ).then(() => self.clients.claim())
   )
-  self.clients.claim()
 })
 
-/**
- * Trim cache to MAX_CACHED_ENTRIES (FIFO).
- */
 async function trimCache(cacheName) {
   const cache = await caches.open(cacheName)
   const keys = await cache.keys()
@@ -41,7 +41,6 @@ async function trimCache(cacheName) {
   }
 }
 
-// Fetch: network-first for navigations, stale-while-revalidate for assets
 self.addEventListener('fetch', (event) => {
   const { request } = event
 
@@ -51,6 +50,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   // Always prefer fresh app shell to avoid stale UI after deploys
+  // Network-first with short TTL for HTML
   if (request.mode === 'navigate' || request.url.endsWith('/index.html')) {
     event.respondWith(
       fetch(request)

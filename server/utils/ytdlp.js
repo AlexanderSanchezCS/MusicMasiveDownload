@@ -1,6 +1,7 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, renameSync, writeFileSync, chmodSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, chmodSync, readdirSync, statSync, unlinkSync } from 'fs'
+import { readdir, stat, unlink } from 'fs/promises'
 import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
@@ -11,76 +12,68 @@ const execFileAsync = promisify(execFile)
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-// --- Instagram cookies: decode from base64 env var on startup ---
+// ─── Instagram cookies ────────────────────────────────────────────────────
 const IG_COOKIES_PATH = join(tmpdir(), 'ig_cookies.txt')
 ;(function initInstagramCookies() {
-  // Option 1: base64-encoded cookies in env var (preferred for Railway)
   const b64 = process.env.INSTAGRAM_COOKIES_BASE64
   if (b64) {
     try {
       const decoded = Buffer.from(b64, 'base64').toString('utf-8')
       writeFileSync(IG_COOKIES_PATH, decoded, { encoding: 'utf-8', mode: 0o600 })
-      // SECURITY: restrict cookie file permissions (owner-only)
       try { chmodSync(IG_COOKIES_PATH, 0o600) } catch {}
       console.log('[ig-cookies] Decoded Instagram cookies from INSTAGRAM_COOKIES_BASE64')
     } catch (e) {
       console.error('[ig-cookies] Failed to decode INSTAGRAM_COOKIES_BASE64:', e.message)
     }
-  }
-  // Option 2: direct file path in INSTAGRAM_COOKIES
-  else if (process.env.INSTAGRAM_COOKIES && existsSync(process.env.INSTAGRAM_COOKIES)) {
+  } else if (process.env.INSTAGRAM_COOKIES && existsSync(process.env.INSTAGRAM_COOKIES)) {
     console.log('[ig-cookies] Using cookies file from INSTAGRAM_COOKIES path')
   }
 })()
 
 function getInstagramCookiesPath() {
-  // Priority: decoded base64 file > direct file path
   if (existsSync(IG_COOKIES_PATH)) return IG_COOKIES_PATH
   const envPath = process.env.INSTAGRAM_COOKIES
   if (envPath && existsSync(envPath)) return envPath
   return null
 }
 
-/**
- * Clean Instagram URLs: remove tracking parameters that can cause issues.
- */
+// ─── URL cleaners ─────────────────────────────────────────────────────────
 function cleanInstagramUrl(url) {
   try {
     const u = new URL(url)
-    // Keep only the path (remove ?igsh=, ?utm_*, etc.)
-    if (u.hostname.includes('instagram')) {
-      // Preserve the core URL structure only
-      return `${u.origin}${u.pathname}`
+    if (u.hostname.includes('instagram')) return `${u.origin}${u.pathname}`
+  } catch {}
+  return url
+}
+
+function cleanTiktokUrl(url) {
+  try {
+    const u = new URL(url)
+    if (u.hostname.includes('tiktok')) {
+      // Remove tracking params (utm_source, _r, etc.) but keep /video/ ID
+      u.searchParams.delete('_r')
+      u.searchParams.delete('_d')
+      u.searchParams.delete('share_author_id')
+      u.searchParams.delete('share_link_id')
+      return u.toString()
     }
   } catch {}
   return url
 }
 
-/**
- * Resolve Facebook share/short URLs to their canonical form.
- * facebook.com/share/r/xxx and facebook.com/share/v/xxx are redirects
- * that yt-dlp can’t always follow. We resolve them first.
- */
 async function resolveFacebookUrl(url) {
   try {
     const u = new URL(url)
-    // Only resolve share links
     if (!u.hostname.includes('facebook') && !u.hostname.includes('fb.watch')) return url
     if (!u.pathname.startsWith('/share/')) return url
 
-    // Use a HEAD request with redirect follow to get the real URL
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 10000)
     const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      },
+      method: 'GET', redirect: 'follow', signal: controller.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36' },
     })
     clearTimeout(timeout)
-    // The final URL after redirects is the canonical one
     if (res.url && res.url !== url) {
       console.log(`[facebook] Resolved share URL: ${url} -> ${res.url}`)
       return res.url
@@ -91,34 +84,39 @@ async function resolveFacebookUrl(url) {
   return url
 }
 
-/**
- * Map common Instagram yt-dlp errors to friendly messages.
- */
+// ─── Platform-specific yt-dlp args ────────────────────────────────────────
 function friendlyInstagramError(msg) {
-  if (msg.includes('There is no video in this post')) {
+  if (msg.includes('There is no video in this post'))
     return 'Este post de Instagram es una imagen, no un video. Solo se pueden descargar Reels y videos.'
-  }
-  if (msg.includes('inappropriate') || msg.includes('unavailable for certain audiences')) {
-    return 'Este contenido de Instagram está restringido por edad o marcado como sensible. Instagram no permite acceder sin iniciar sesión.'
-  }
-  if (msg.includes('login') || msg.includes('Login') || msg.includes('authentication')) {
-    return 'Este contenido de Instagram requiere iniciar sesión. Solo se pueden descargar publicaciones públicas.'
-  }
-  if (msg.includes('Private') || msg.includes('private')) {
-    return 'Esta cuenta o publicación de Instagram es privada. Solo se pueden descargar publicaciones públicas.'
-  }
-  if (msg.includes('not found') || msg.includes('404') || msg.includes('Not Found')) {
-    return 'No se encontró esta publicación de Instagram. Verifica que el enlace sea correcto.'
-  }
-  if (msg.includes('rate') || msg.includes('429') || msg.includes('too many')) {
-    return 'Instagram está limitando las solicitudes. Espera unos minutos e inténtalo de nuevo.'
-  }
-  return null // no match, use generic
+  if (msg.includes('inappropriate') || msg.includes('unavailable for certain audiences'))
+    return 'Este contenido de Instagram está restringido por edad o marcado como sensible.'
+  if (msg.includes('login') || msg.includes('Login') || msg.includes('authentication'))
+    return 'Este contenido de Instagram requiere iniciar sesión. Solo publicaciones públicas.'
+  if (msg.includes('Private') || msg.includes('private'))
+    return 'Esta cuenta o publicación de Instagram es privada.'
+  if (msg.includes('not found') || msg.includes('404') || msg.includes('Not Found'))
+    return 'No se encontró esta publicación de Instagram. Verifica el enlace.'
+  if (msg.includes('rate') || msg.includes('429') || msg.includes('too many'))
+    return 'Instagram está limitando las solicitudes. Espera unos minutos.'
+  return null
 }
 
-/**
- * Build common Instagram yt-dlp arguments.
- */
+function friendlyTiktokError(msg) {
+  if (msg.includes('blocked') || msg.includes('captcha') || msg.includes('captchaVerify'))
+    return 'TikTok bloqueó la solicitud. Espera unos minutos e intenta de nuevo.'
+  if (msg.includes('expire') || msg.includes('expired') || msg.includes('token'))
+    return 'El enlace de TikTok expiró. Genera un nuevo enlace e intenta de nuevo.'
+  if (msg.includes('not found') || msg.includes('404') || msg.includes('Not Found'))
+    return 'No se encontró este video de TikTok. Verifica que el enlace sea correcto.'
+  if (msg.includes('private') || msg.includes('Private'))
+    return 'Esta cuenta de TikTok es privada. Solo se pueden descargar videos públicos.'
+  if (msg.includes('rate') || msg.includes('429') || msg.includes('too many'))
+    return 'TikTok está limitando las solicitudes. Espera unos minutos.'
+  if (msg.includes('region') || msg.includes('geo') || msg.includes('not available'))
+    return 'Este video de TikTok no está disponible en tu región.'
+  return null
+}
+
 function getInstagramArgs() {
   const args = [
     '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
@@ -127,52 +125,78 @@ function getInstagramArgs() {
     '--add-header', 'Sec-Fetch-Mode:navigate',
     '--extractor-retries', '3',
     '--socket-timeout', '30',
-    // SECURITY: DO NOT use --no-check-certificates; it disables TLS verification
-    // making the connection vulnerable to man-in-the-middle attacks.
   ]
-
-  // Use Instagram cookies for authenticated access (bypasses age-gate, login walls)
   const cookiesPath = getInstagramCookiesPath()
-  if (cookiesPath) {
-    args.push('--cookies', cookiesPath)
-  }
-
+  if (cookiesPath) args.push('--cookies', cookiesPath)
   return args
 }
 
-/**
- * Run a yt-dlp command with retry logic for Instagram.
- */
-async function execWithRetry(args, opts, maxRetries = 2) {
+// TikTok needs special headers and relaxed TLS to bypass anti-bot measures
+function getTiktokArgs() {
+  return [
+    '--no-check-certificate',
+    '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    '--referer', 'https://www.tiktok.com/',
+    '--add-header', 'Accept:text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    '--add-header', 'Accept-Language:en-US,en;q=0.5',
+    '--add-header', 'Sec-Fetch-Mode:navigate',
+    '--add-header', 'Sec-Fetch-Site:same-origin',
+    '--extractor-retries', '3',
+    '--socket-timeout', '15',
+    '--retries', '3',
+  ]
+}
+
+// ─── Retry helpers ────────────────────────────────────────────────────────
+async function execWithRetry(args, opts, platform, maxRetries = 2) {
   let lastError
   for (let i = 0; i <= maxRetries; i++) {
     try {
       return await execFileAsync(YTDLP_PATH, args, opts)
     } catch (error) {
       lastError = error
-      // Don't retry for definitive errors
       const msg = error.message || ''
-      if (
-        msg.includes('no video in this post') ||
-        msg.includes('Private') ||
-        msg.includes('not found') ||
-        msg.includes('404')
-      ) {
+      // Don't retry for definitive errors
+      if (msg.includes('no video in this post') || msg.includes('Private') ||
+          msg.includes('not found') || msg.includes('404') || msg.includes('blocked') ||
+          msg.includes('captcha')) {
         throw error
       }
       if (i < maxRetries) {
-        // Wait before retry (exponential: 2s, 4s)
-        await new Promise(r => setTimeout(r, (i + 1) * 2000))
-        console.log(`[retry] Instagram attempt ${i + 2}/${maxRetries + 1}`)
+        const delay = (i + 1) * 2000
+        await new Promise(r => setTimeout(r, delay))
+        console.log(`[retry] ${platform} attempt ${i + 2}/${maxRetries + 1} after ${delay}ms`)
       }
     }
   }
   throw lastError
 }
 
-// --- Concurrency limiter: prevent too many simultaneous yt-dlp / ffmpeg processes ---
-// SCALE: 10 concurrent processes handles ~100 users well on Railway (1-2 vCPU, 2-8GB RAM).
-// Each yt-dlp process uses ~50-100MB RAM. Adjust via env var for your server capacity.
+// TikTok-specific: longer retries with more attempts (TikTok is flaky)
+async function execTiktokWithRetry(args, opts, maxRetries = 3) {
+  let lastError
+  for (let i = 0; i <= maxRetries; i++) {
+    try {
+      return await execFileAsync(YTDLP_PATH, args, opts)
+    } catch (error) {
+      lastError = error
+      const msg = error.message || ''
+      // Don't retry for definitive errors
+      if (msg.includes('not found') || msg.includes('404') || msg.includes('blocked') ||
+          msg.includes('captcha') || msg.includes('private')) {
+        throw error
+      }
+      if (i < maxRetries) {
+        const delay = (i + 1) * 3000  // 3s, 6s, 9s for TikTok
+        await new Promise(r => setTimeout(r, delay))
+        console.log(`[retry] TikTok attempt ${i + 2}/${maxRetries + 1} after ${delay}ms`)
+      }
+    }
+  }
+  throw lastError
+}
+
+// ─── Concurrency limiter ─────────────────────────────────────────────────
 const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT_DOWNLOADS || '10', 10)
 let activeDownloads = 0
 const downloadQueue = []
@@ -191,107 +215,178 @@ function releaseSlot() {
   activeDownloads--
   if (downloadQueue.length > 0) {
     activeDownloads++
-    const next = downloadQueue.shift()
-    next()
+    downloadQueue.shift()()
   }
 }
 
-// Expose stats for health check / monitoring
 export function getDownloadStats() {
-  return {
-    active: activeDownloads,
-    queued: downloadQueue.length,
-    maxConcurrent: MAX_CONCURRENT_DOWNLOADS,
-  }
+  return { active: activeDownloads, queued: downloadQueue.length, maxConcurrent: MAX_CONCURRENT_DOWNLOADS }
 }
 
-// yt-dlp binary - defaults to system PATH
+// ─── Binaries + temp dir ─────────────────────────────────────────────────
 const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
-
-// ffmpeg location - local bin folder
 const FFMPEG_DIR = join(__dirname, '..', 'bin')
 const HAS_LOCAL_FFMPEG = existsSync(join(FFMPEG_DIR, 'ffmpeg.exe')) || existsSync(join(FFMPEG_DIR, 'ffmpeg'))
 
-// Temp directory for downloads
 const TEMP_DIR = join(tmpdir(), 'musicmasivedownload')
-if (!existsSync(TEMP_DIR)) {
-  mkdirSync(TEMP_DIR, { recursive: true })
-}
+if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true })
 
-// --- Temp file cleanup: remove files older than 10 minutes every 5 minutes ---
-// SCALE: With hundreds of users, files build up fast. Aggressive cleanup needed.
-const CLEANUP_INTERVAL_MS = 5 * 60 * 1000  // 5 minutes
-const MAX_FILE_AGE_MS = 10 * 60 * 1000     // 10 minutes (file already streamed by then)
+// Temp cleanup
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000
+const MAX_FILE_AGE_MS = 10 * 60 * 1000
 
-function cleanupTempFiles() {
+// ✅ FIX 11 — Async cleanup to avoid blocking the event loop
+async function cleanupTempFiles() {
   try {
     const now = Date.now()
-    const files = readdirSync(TEMP_DIR)
+    const files = await readdir(TEMP_DIR)
     let cleaned = 0
     for (const file of files) {
       const filePath = join(TEMP_DIR, file)
       try {
-        const stat = statSync(filePath)
-        if (now - stat.mtimeMs > MAX_FILE_AGE_MS) {
-          unlinkSync(filePath)
+        const fileStat = await stat(filePath)
+        if (now - fileStat.mtimeMs > MAX_FILE_AGE_MS) {
+          await unlink(filePath)
           cleaned++
         }
-      } catch { /* ignore individual file errors */ }
+      } catch { /* ignore */ }
     }
-    if (cleaned > 0) console.log(`[cleanup] Removed ${cleaned} stale temp files (${files.length - cleaned} remaining)`)
+    if (cleaned > 0) console.log(`[cleanup] Removed ${cleaned} stale temp files`)
   } catch (err) {
     console.error('[cleanup] Error cleaning temp dir:', err.message)
   }
 }
 
-// Run cleanup on startup and then periodically
 cleanupTempFiles()
 setInterval(cleanupTempFiles, CLEANUP_INTERVAL_MS)
 
-/**
- * Get video information from a supported URL
- */
+// ─── Platform detection ──────────────────────────────────────────────────
+function detectPlatform(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase()
+    if (hostname.includes('youtube') || hostname.includes('youtu.be')) return 'youtube'
+    if (hostname.includes('facebook') || hostname.includes('fb.watch')) return 'facebook'
+    if (hostname.includes('instagram')) return 'instagram'
+    if (hostname.includes('tiktok') || hostname.includes('musical.ly')) return 'tiktok'
+  } catch {}
+  return 'other'
+}
+
+// ─── In-memory cache for /api/info (TTL-based + dedup) ───────────────────
+// Stores: { data, expiresAt } keyed by URL
+const infoCache = new Map()
+// Stores: in-flight Promise keyed by URL (request deduplication)
+const inFlightRequests = new Map()
+
+const INFO_CACHE_TTL_MS = 3 * 60 * 1000 // 3 minutes
+const CACHE_CLEANUP_INTERVAL_MS = 60 * 1000 // Clean every minute
+// ✅ FIX 4 — Prevent unbounded cache growth
+const MAX_CACHE_ENTRIES = 500
+
+function getCachedInfo(url) {
+  const entry = infoCache.get(url)
+  if (entry && entry.expiresAt > Date.now()) return entry.data
+  if (entry) infoCache.delete(url) // expired
+  return null
+}
+
+function setCachedInfo(url, data) {
+  // ✅ FIX 4 — Evict oldest entry when cache is full
+  if (infoCache.size >= MAX_CACHE_ENTRIES) {
+    const firstKey = infoCache.keys().next().value
+    infoCache.delete(firstKey)
+  }
+  infoCache.set(url, { data, expiresAt: Date.now() + INFO_CACHE_TTL_MS })
+}
+
+function cacheCleanup() {
+  const now = Date.now()
+  for (const [url, entry] of infoCache.entries()) {
+    if (entry.expiresAt <= now) infoCache.delete(url)
+  }
+}
+
+setInterval(cacheCleanup, CACHE_CLEANUP_INTERVAL_MS)
+
+// ─── getVideoInfo (with TikTok fix + caching + dedup) ────────────────────
 export async function getVideoInfo(url, isPlaylist = false) {
   const platform = detectPlatform(url)
 
-  // Clean Instagram URLs to remove tracking params
-  if (platform === 'instagram') {
-    url = cleanInstagramUrl(url)
+  // Platform-specific URL cleaning
+  if (platform === 'instagram') url = cleanInstagramUrl(url)
+  if (platform === 'facebook') url = await resolveFacebookUrl(url)
+  if (platform === 'tiktok') url = cleanTiktokUrl(url)
+
+  // Cache check (skip dedup for playlists — they're rare and heavy)
+  const cacheKey = `${platform}:${url}:${isPlaylist ? 'pl' : 'vid'}`
+  if (!isPlaylist) {
+    const cached = getCachedInfo(cacheKey)
+    if (cached) {
+      console.log(`[cache] HIT for ${cacheKey}`)
+      return cached
+    }
   }
 
-  // Resolve Facebook share/short URLs
-  if (platform === 'facebook') {
-    url = await resolveFacebookUrl(url)
+  // Deduplicate in-flight requests for same URL
+  if (!isPlaylist && inFlightRequests.has(cacheKey)) {
+    console.log(`[dedup] Waiting for in-flight request: ${cacheKey}`)
+    return inFlightRequests.get(cacheKey)
   }
 
+  const promise = _getVideoInfoImpl(url, platform, isPlaylist).then(result => {
+    // Cache result
+    if (!isPlaylist) setCachedInfo(cacheKey, result)
+    return result
+  }).finally(() => {
+    // Remove from in-flight
+    inFlightRequests.delete(cacheKey)
+  })
+
+  if (!isPlaylist) inFlightRequests.set(cacheKey, promise)
+  return promise
+}
+
+async function _getVideoInfoImpl(url, platform, isPlaylist) {
   const args = [
     '--dump-json',
     '--no-warnings',
-    '--no-playlist',
+    isPlaylist ? '--yes-playlist' : '--no-playlist',
   ]
 
-  // Instagram needs special handling
-  if (platform === 'instagram') {
-    args.push(...getInstagramArgs())
-  }
+  if (isPlaylist) args.push('--flat-playlist')
 
-  if (isPlaylist) {
-    args[2] = '--yes-playlist'
-    args.push('--flat-playlist')
-  }
+  // Platform-specific args
+  if (platform === 'instagram') args.push(...getInstagramArgs())
+  if (platform === 'tiktok') args.push(...getTiktokArgs())
 
   args.push(url)
 
+  const isInstagram = platform === 'instagram'
+  const isTiktok = platform === 'tiktok'
+
+  // Timeout: Instagram = 60s, TikTok = 20s, others = 15s
+  const timeout = isInstagram ? 60000 : isTiktok ? 20000 : 15000
+
   const execOpts = {
-    timeout: platform === 'instagram' ? 60000 : 30000,
-    maxBuffer: 5 * 1024 * 1024, // PERF: 5 MB is plenty for JSON metadata
+    timeout,
+    maxBuffer: 5 * 1024 * 1024,
   }
 
+  console.log(`[info] ${platform} | timeout=${timeout}ms | url=${url.slice(0, 100)}`)
+
   try {
-    const execFn = platform === 'instagram'
-      ? () => execWithRetry(args, execOpts)
-      : () => execFileAsync(YTDLP_PATH, args, execOpts)
-    const { stdout } = await execFn()
+    const execFn = isInstagram
+      ? () => execWithRetry(args, execOpts, platform)
+      : isTiktok
+        ? () => execTiktokWithRetry(args, execOpts)
+        : () => execFileAsync(YTDLP_PATH, args, execOpts)
+
+    const { stdout, stderr } = await execFn()
+
+    // Log stderr for debugging (yt-dlp warnings, not errors)
+    if (stderr && stderr.trim()) {
+      console.log(`[info] ${platform} stderr: ${stderr.trim().slice(0, 500)}`)
+    }
 
     if (isPlaylist) {
       const lines = stdout.trim().split('\n').filter(l => l.trim())
@@ -313,7 +408,28 @@ export async function getVideoInfo(url, isPlaylist = false) {
       return { type: 'playlist', videos, count: videos.length }
     }
 
-    const data = JSON.parse(stdout)
+    // ✅ FIX 5 — Robust JSON parsing: yt-dlp may output warnings before JSON
+    const jsonStr = stdout.slice(stdout.indexOf('{'), stdout.lastIndexOf('}') + 1)
+    if (!jsonStr || jsonStr === '{}' || jsonStr.indexOf('{') === -1) {
+      console.error(`[info] ${platform} Malformed JSON response: ${stdout.slice(0, 300)}`)
+      throw new Error('Respuesta inválida del servidor')
+    }
+
+    let data
+    try {
+      data = JSON.parse(jsonStr)
+    } catch (parseErr) {
+      // Fallback: try each nested JSON object from last to first
+      const matches = stdout.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g)
+      if (!matches) throw new Error('Respuesta inválida del servidor')
+      for (let i = matches.length - 1; i >= 0; i--) {
+        try {
+          data = JSON.parse(matches[i])
+          break
+        } catch { continue }
+      }
+      if (!data) throw new Error('Respuesta inválida del servidor')
+    }
     return {
       type: 'video',
       id: data.id,
@@ -324,57 +440,54 @@ export async function getVideoInfo(url, isPlaylist = false) {
       view_count: data.view_count,
     }
   } catch (error) {
+    // Log full stderr for debugging
+    if (error.stderr) {
+      console.error(`[info] ${platform} stderr (full):`, error.stderr.slice(0, 1000))
+    }
+
+    // Platform-specific friendly errors
     if (platform === 'instagram') {
       const friendly = friendlyInstagramError(error.message)
       if (friendly) throw new Error(friendly)
     }
-    // Strip yt-dlp command details from error to avoid leaking internals
+    if (platform === 'tiktok') {
+      const friendly = friendlyTiktokError(error.message)
+      if (friendly) throw new Error(friendly)
+    }
+
+    // Strip command details
     const msg = error.message || ''
     if (msg.includes('Command failed') || msg.includes('ERROR:')) {
-      // Extract just the yt-dlp error line if present
       const ytdlpError = msg.match(/ERROR:\s*(.+)/)?.[1]
       throw new Error(ytdlpError || 'No se pudo obtener información del video. Verifica que el enlace sea correcto y el contenido sea público.')
     }
+
+    // Timeout detection
+    if (msg.includes('timed out') || error.code === 'ETIMEDOUT' || error.killed === true) {
+      if (platform === 'tiktok') {
+        throw new Error('TikTok bloqueó la solicitud. Espera unos minutos e intenta de nuevo.')
+      }
+      throw new Error('La solicitud tardó demasiado. Inténtalo de nuevo.')
+    }
+
     throw new Error('No se pudo obtener información del video.')
   }
 }
 
-/**
- * Detect platform from URL to customize yt-dlp arguments.
- */
-function detectPlatform(url) {
-  try {
-    const hostname = new URL(url).hostname.toLowerCase()
-    if (hostname.includes('youtube') || hostname.includes('youtu.be')) return 'youtube'
-    if (hostname.includes('facebook') || hostname.includes('fb.watch')) return 'facebook'
-    if (hostname.includes('instagram')) return 'instagram'
-    if (hostname.includes('tiktok')) return 'tiktok'
-  } catch {}
-  return 'other'
-}
-
-/**
- * Get a direct media URL without downloading to disk.
- * Used by /api/download fast-path streaming proxy for MP4.
- */
+// ─── getDirectUrl (MP4 streaming fast-path) ──────────────────────────────
 export async function getDirectUrl(url, format = 'mp4', quality = '720') {
   if (format !== 'mp4') return null
 
   const platform = detectPlatform(url)
 
-  if (platform === 'instagram') {
-    url = cleanInstagramUrl(url)
-  }
-
-  if (platform === 'facebook') {
-    url = await resolveFacebookUrl(url)
-  }
+  if (platform === 'instagram') url = cleanInstagramUrl(url)
+  if (platform === 'facebook') url = await resolveFacebookUrl(url)
+  if (platform === 'tiktok') url = cleanTiktokUrl(url)
 
   const args = ['-g', '--no-warnings', '--no-playlist']
 
-  if (platform === 'instagram') {
-    args.push(...getInstagramArgs())
-  }
+  if (platform === 'instagram') args.push(...getInstagramArgs())
+  if (platform === 'tiktok') args.push(...getTiktokArgs())
 
   if (platform === 'youtube') {
     args.push('-f', `best[height<=${quality}][ext=mp4]/best[height<=${quality}]/best`)
@@ -384,39 +497,29 @@ export async function getDirectUrl(url, format = 'mp4', quality = '720') {
 
   args.push(url)
 
-  const execOpts = {
-    timeout: 45000,
-    maxBuffer: 1024 * 1024,
-  }
+  const execOpts = { timeout: 45000, maxBuffer: 1024 * 1024 }
 
   try {
     const execFn = platform === 'instagram'
-      ? () => execWithRetry(args, execOpts)
-      : () => execFileAsync(YTDLP_PATH, args, execOpts)
+      ? () => execWithRetry(args, execOpts, platform)
+      : platform === 'tiktok'
+        ? () => execTiktokWithRetry(args, execOpts)
+        : () => execFileAsync(YTDLP_PATH, args, execOpts)
 
     const { stdout } = await execFn()
-    const directUrl = stdout
-      .split('\n')
-      .map(line => line.trim())
-      .find(line => line.startsWith('http'))
-
+    const directUrl = stdout.split('\n').map(l => l.trim()).find(l => l.startsWith('http'))
     if (!directUrl) return null
 
     return { directUrl }
   } catch (error) {
+    console.log(`[getDirectUrl] ${platform} failed: ${error.message.slice(0, 200)}`)
     return null
   }
 }
 
-/**
- * Download media from a supported URL.
- * Accepts an optional `title` so the caller can pass the title obtained
- * from /api/info, avoiding a second yt-dlp call just to get the title.
- */
+// ─── downloadMedia ───────────────────────────────────────────────────────
 export async function downloadMedia(url, format = 'mp3', quality = '192', title = '') {
-  // PERF: Wait for a concurrency slot before spawning yt-dlp
   await acquireSlot()
-
   try {
     return await _downloadMediaImpl(url, format, quality, title)
   } finally {
@@ -429,51 +532,24 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
   const outputTemplate = join(TEMP_DIR, `${id}.%(ext)s`)
   const platform = detectPlatform(url)
 
-  // Clean Instagram URLs
-  if (platform === 'instagram') {
-    url = cleanInstagramUrl(url)
-  }
-
-  // Resolve Facebook share/short URLs
-  if (platform === 'facebook') {
-    url = await resolveFacebookUrl(url)
-  }
+  if (platform === 'instagram') url = cleanInstagramUrl(url)
+  if (platform === 'facebook') url = await resolveFacebookUrl(url)
+  if (platform === 'tiktok') url = cleanTiktokUrl(url)
 
   const args = ['--no-warnings', '--no-playlist']
 
-  // Add ffmpeg location if available locally
-  if (HAS_LOCAL_FFMPEG) {
-    args.push('--ffmpeg-location', FFMPEG_DIR)
-  }
+  if (HAS_LOCAL_FFMPEG) args.push('--ffmpeg-location', FFMPEG_DIR)
 
-  // Instagram needs special headers, retries, and optional cookies
-  if (platform === 'instagram') {
-    args.push(...getInstagramArgs())
-  }
+  if (platform === 'instagram') args.push(...getInstagramArgs())
+  if (platform === 'tiktok') args.push(...getTiktokArgs())
 
   if (format === 'mp3') {
-    args.push(
-      '-x',
-      '--audio-format', 'mp3',
-      '--audio-quality', getAudioQuality(quality),
-    )
-    // --embed-thumbnail only reliable on YouTube
-    if (platform === 'youtube') {
-      args.push('--embed-thumbnail', '--add-metadata')
-    }
+    args.push('-x', '--audio-format', 'mp3', '--audio-quality', getAudioQuality(quality))
+    if (platform === 'youtube') args.push('--embed-thumbnail', '--add-metadata')
   } else {
-    // MP4 video
     if (platform === 'youtube') {
-      // YouTube has separate streams — use specific format selector
-      // Prefer H.264+AAC for instant merge; falls back to VP9+opus if needed
-      const videoQuality = getVideoQuality(quality)
-      args.push(
-        '-f', videoQuality,
-        '--merge-output-format', 'mp4',
-      )
+      args.push('-f', getVideoQuality(quality), '--merge-output-format', 'mp4')
     } else {
-      // Facebook, Instagram, TikTok — prefer H.264 for MP4 compatibility.
-      // Use --remux-video to convert container to MP4 without slow re-encoding.
       args.push(
         '-f', `best[height<=${quality}][vcodec^=avc]/best[height<=${quality}]/best`,
         '-S', 'vcodec:h264,acodec:aac',
@@ -484,29 +560,33 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
 
   args.push('-o', outputTemplate, url)
 
-  // MP4 merges (especially if ffmpeg needs to transcode audio) can take longer than MP3
-  const dlTimeout = format === 'mp4' ? 600000 : 300000 // 10 min MP4, 5 min MP3
-  const dlOpts = {
-    timeout: dlTimeout,
-    maxBuffer: 10 * 1024 * 1024, // PERF: reduced from 50 MB; yt-dlp stdout for a single download is small
-  }
+  const isInstagram = platform === 'instagram'
+  const isTiktok = platform === 'tiktok'
+  const dlTimeout = format === 'mp4' ? 600000 : 300000
+
+  const dlOpts = { timeout: dlTimeout, maxBuffer: 10 * 1024 * 1024 }
+
+  console.log(`[download] ${platform} | ${format}/${quality} | url=${url.slice(0, 100)}`)
 
   try {
-    if (platform === 'instagram') {
-      await execWithRetry(args, dlOpts)
-    } else {
-      await execFileAsync(YTDLP_PATH, args, dlOpts)
+    const execFn = isInstagram
+      ? () => execWithRetry(args, dlOpts, platform)
+      : isTiktok
+        ? () => execTiktokWithRetry(args, dlOpts)
+        : () => execFileAsync(YTDLP_PATH, args, dlOpts)
+
+    const { stderr } = await execFn()
+
+    if (stderr && stderr.trim()) {
+      console.log(`[download] ${platform} stderr: ${stderr.trim().slice(0, 500)}`)
     }
 
-    // Find the output file
     const ext = format === 'mp3' ? 'mp3' : 'mp4'
     let filePath = join(TEMP_DIR, `${id}.${ext}`)
 
-    // Use the title provided by the caller; only fall back to 'download'
     const safeTitle = (title && title.trim()) ? title.trim() : 'download'
 
     if (!existsSync(filePath)) {
-      // Try to find the actual file (extension may differ)
       const files = readdirSync(TEMP_DIR).filter(f => f.startsWith(id))
       if (files.length > 0) {
         filePath = join(TEMP_DIR, files[0])
@@ -522,28 +602,25 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
       mimeType: finalExt === 'mp3' ? 'audio/mpeg' : 'video/mp4',
     }
   } catch (error) {
-    // Friendly errors for Instagram
     if (platform === 'instagram') {
       const friendly = friendlyInstagramError(error.message)
+      if (friendly) throw new Error(friendly)
+    }
+    if (platform === 'tiktok') {
+      const friendly = friendlyTiktokError(error.message)
       if (friendly) throw new Error(friendly)
     }
     throw new Error(`Error en descarga: ${error.message}`)
   }
 }
 
+// ─── Quality maps ────────────────────────────────────────────────────────
 function getAudioQuality(quality) {
-  const map = {
-    '128': '5',
-    '192': '2',
-    '256': '1',
-    '320': '0',
-  }
+  const map = { '128': '5', '192': '2', '256': '1', '320': '0' }
   return map[quality] || '2'
 }
 
 function getVideoQuality(quality) {
-  // Prefer H.264 (avc1) + AAC (mp4a) to avoid slow VP9→H.264 re-encoding when merging to MP4.
-  // Fallback chain: avc1+mp4a → avc1+any → any+any → single best stream.
   const map = {
     '360':  `bestvideo[height<=360][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=360][vcodec^=avc1]+bestaudio/bestvideo[height<=360]+bestaudio/best[height<=360]`,
     '480':  `bestvideo[height<=480][vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo[height<=480][vcodec^=avc1]+bestaudio/bestvideo[height<=480]+bestaudio/best[height<=480]`,

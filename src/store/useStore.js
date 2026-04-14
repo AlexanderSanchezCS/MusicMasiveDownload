@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 
+// ─── Centralized API Configuration ───────────────────────────────────────
 const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
 const DOWNLOAD_BASE_URL = (import.meta.env.VITE_DOWNLOAD_API_URL || API_BASE_URL).replace(/\/$/, '')
 
@@ -7,17 +8,64 @@ function buildApiUrl(baseUrl, path) {
   return baseUrl ? `${baseUrl}/api/${path}` : `/api/${path}`
 }
 
-// Max concurrent browser downloads — 3 keeps browser memory manageable
-// (3 concurrent × ~10MB avg MP3 = ~30MB RAM peak; for MP4 ~150MB peak)
-const MAX_CONCURRENT = 3
+// ─── Centralized API Client ──────────────────────────────────────────────
+/**
+ * POST-based API client with validation, logging, and error handling.
+ * All API calls MUST use this function — no raw fetch() allowed.
+ */
+async function apiCall(endpoint, body, baseUrl = API_BASE_URL) {
+  const url = buildApiUrl(baseUrl, endpoint)
 
-// Max history entries and max localStorage size (bytes)
+  // Validate URL field in request body
+  if (body && typeof body === 'object' && 'url' in body) {
+    if (!body.url || typeof body.url !== 'string' || body.url.trim().length === 0) {
+      throw new Error('URL is required')
+    }
+  }
+
+  // Debug logging (dev only)
+  if (import.meta.env.DEV) {
+    console.log(`[api] POST ${url}`, body)
+  }
+
+  // AbortController for timeout (30s for info, 5min for download)
+  const isDownload = endpoint === 'download'
+  const timeoutMs = isDownload ? 300000 : 30000
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+
+    // Log non-OK responses
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => ({}))
+      const errorMsg = errorBody?.error || errorBody?.message || `HTTP ${response.status}`
+
+      if (import.meta.env.DEV) {
+        console.error(`[api] ERROR ${response.status} from ${url}:`, errorMsg)
+      }
+
+      if (response.status === 404) throw new Error('backend-unavailable')
+      throw new Error(errorMsg)
+    }
+
+    return response
+  } finally {
+    clearTimeout(timeoutId)
+  }
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────
+const MAX_CONCURRENT = 3
 const MAX_HISTORY = 500
 const MAX_LOCALSTORAGE_BYTES = 5 * 1024 * 1024 // 5 MB safety limit
 
-/**
- * Supported platforms configuration
- */
 export const PLATFORMS = [
   { id: 'youtube',   label: 'YouTube',   icon: 'FaYoutube',   color: '#FF0000', hosts: ['youtube.com', 'youtu.be', 'www.youtube.com', 'm.youtube.com'] },
   { id: 'facebook',  label: 'Facebook',  icon: 'FaFacebook',  color: '#1877F2', hosts: ['facebook.com', 'www.facebook.com', 'fb.watch', 'm.facebook.com', 'web.facebook.com'] },
@@ -27,13 +75,11 @@ export const PLATFORMS = [
 
 const ALL_HOSTS = PLATFORMS.flatMap(p => p.hosts)
 
-/**
- * Classify a fetch / network error into a user-friendly message.
- */
+// ─── Error Classification ────────────────────────────────────────────────
 function friendlyError(error) {
   const msg = error?.message || ''
   if (msg.includes('Application not found') || msg.includes('backend-unavailable')) {
-    return 'El backend de descargas no está disponible en este momento. Verifica la URL del backend en Vercel (VITE_API_URL / VITE_DOWNLOAD_API_URL) y que Railway esté activo.'
+    return 'El backend de descargas no está disponible. Verifica VITE_API_URL en Vercel y que Railway esté activo.'
   }
   if (msg === 'Failed to fetch' || msg === 'NetworkError when attempting to fetch resource.') {
     return 'No se pudo conectar con el servidor. Verifica tu conexión o inténtalo más tarde.'
@@ -47,93 +93,58 @@ function friendlyError(error) {
   if (msg.includes('502') || msg.includes('503') || msg.includes('504')) {
     return 'El servidor está ocupado o reiniciándose. Inténtalo en unos segundos.'
   }
-  // Strip internal command details (e.g. "Command failed: yt-dlp ...")
   if (msg.includes('Command failed') || msg.includes('yt-dlp') || msg.includes('ffmpeg')) {
     return 'No se pudo procesar este enlace. Verifica que el video sea público y el link sea correcto.'
+  }
+  if (msg === 'URL is required') {
+    return 'La URL está vacía. Ingresa un link válido.'
+  }
+  // TikTok-specific
+  if (msg.includes('TikTok bloqueó')) {
+    return 'TikTok bloqueó la solicitud. Espera unos minutos e intenta de nuevo.'
+  }
+  if (msg.includes('expiró')) {
+    return 'El enlace de TikTok expiró. Genera un nuevo enlace desde la app.'
   }
   return msg || 'Error desconocido'
 }
 
-async function parseApiError(response, fallbackMessage) {
-  const body = await response.json().catch(() => ({}))
-  const message = body?.message || body?.error || fallbackMessage
-  if (typeof message === 'string' && message.includes('Application not found')) {
-    throw new Error('backend-unavailable')
-  }
-  throw new Error(message)
-}
-
-/**
- * Check if a URL belongs to any supported platform.
- */
-function isSupportedUrl(url) {
-  try {
-    const u = new URL(url)
-    return ALL_HOSTS.some(h => u.hostname === h || u.hostname.endsWith('.' + h))
-  } catch {
-    return false
-  }
-}
-
-/**
- * Check if a URL belongs to a specific platform.
- */
+// ─── URL Helpers ─────────────────────────────────────────────────────────
 function isSupportedUrlForPlatform(url, platformId) {
-  if (platformId === 'all') return isSupportedUrl(url)
+  if (platformId === 'all') {
+    try { const u = new URL(url); return ALL_HOSTS.some(h => u.hostname === h || u.hostname.endsWith('.' + h)) } catch { return false }
+  }
   const platform = PLATFORMS.find(p => p.id === platformId)
-  if (!platform) return isSupportedUrl(url)
+  if (!platform) {
+    try { const u = new URL(url); return ALL_HOSTS.some(h => u.hostname === h || u.hostname.endsWith('.' + h)) } catch { return false }
+  }
   try {
     const u = new URL(url)
     return platform.hosts.some(h => u.hostname === h || u.hostname.endsWith('.' + h))
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
-/**
- * Detect whether a YouTube URL points to a playlist.
- */
 function isPlaylistUrl(url) {
   try {
     const u = new URL(url)
     return u.searchParams.has('list') && !u.searchParams.has('v')
-  } catch {
-    return false
-  }
+  } catch { return false }
 }
 
-/**
- * Estimate download file size (bytes) from duration, format and quality.
- * This allows showing real progress even when Content-Length is unavailable
- * (e.g. when the response goes through Vercel's rewrite proxy).
- *
- * The estimates are intentionally conservative (slightly larger) so the
- * progress bar never overshoots past ~95% before the download finishes.
- */
 function estimateFileSize(durationSec, format, quality) {
   if (!durationSec || durationSec <= 0) return 0
-
   if (format === 'mp3') {
-    // kbps → bytes/sec = kbps * 1000 / 8
     const bitrateMap = { '128': 128, '192': 192, '256': 256, '320': 320 }
     const kbps = bitrateMap[quality] || 192
-    // Add 15% overhead for metadata/container
     return Math.round(durationSec * (kbps * 1000 / 8) * 1.15)
   }
-
-  // MP4: rough average bitrate estimates (video + audio) in kbps
-  const videoBitrateMap = {
-    '360': 700,
-    '480': 1200,
-    '720': 2500,
-    '1080': 5000,
-    '1440': 10000,
-    '2160': 20000,
-  }
-  const kbps = videoBitrateMap[quality] || 2500
-  return Math.round(durationSec * (kbps * 1000 / 8) * 1.1)
+  // ✅ FIX 12 — More accurate YouTube bitrate estimates
+  const videoBitrateMap = { '360': 500, '480': 800, '720': 1500, '1080': 3000, '1440': 6000, '2160': 12000 }
+  const kbps = videoBitrateMap[quality] || 1500
+  return Math.round(durationSec * (kbps * 1000 / 8) * 1.05)
 }
 
+// ─── Zustand Store ───────────────────────────────────────────────────────
 const useStore = create((set, get) => ({
   // URLs input
   urls: '',
@@ -148,7 +159,7 @@ const useStore = create((set, get) => ({
   // Downloads queue
   downloads: [],
   addDownload: (download) => set((s) => ({
-    downloads: [...s.downloads, { ...download, id: Date.now() + Math.random(), progress: 0, status: 'pending' }]
+    downloads: [...s.downloads, { ...download, id: crypto.randomUUID(), progress: 0, status: 'pending' }]
   })),
   updateDownload: (id, data) => set((s) => ({
     downloads: s.downloads.map(d => d.id === id ? { ...d, ...data } : d)
@@ -158,28 +169,19 @@ const useStore = create((set, get) => ({
   })),
   clearDownloads: () => set({ downloads: [] }),
 
-  // History — SECURITY: bound size to avoid localStorage quota errors
+  // History
   history: (() => {
-    try {
-      return JSON.parse(localStorage.getItem('mmdownload_history') || '[]')
-    } catch {
-      return []
-    }
+    try { return JSON.parse(localStorage.getItem('mmdownload_history') || '[]') } catch { return [] }
   })(),
   addToHistory: (item) => set((s) => {
-    const newHistory = [
-      { ...item, downloadedAt: new Date().toISOString() },
-      ...s.history,
-    ].slice(0, MAX_HISTORY)
+    // ✅ FIX 10 — Add unique ID to prevent duplicate keys in React
+    const newHistory = [{ ...item, id: crypto.randomUUID(), downloadedAt: new Date().toISOString() }, ...s.history].slice(0, MAX_HISTORY)
     try {
       const serialized = JSON.stringify(newHistory)
-      // SECURITY: guard against localStorage quota exhaustion
       if (serialized.length < MAX_LOCALSTORAGE_BYTES) {
         localStorage.setItem('mmdownload_history', serialized)
       }
-    } catch {
-      // Storage full — silently skip persistence
-    }
+    } catch { /* quota exceeded — skip silently */ }
     return { history: newHistory }
   }),
   clearHistory: () => {
@@ -194,29 +196,36 @@ const useStore = create((set, get) => ({
   setActiveTab: (tab) => set({ activeTab: tab }),
   showHistory: false,
   setShowHistory: (v) => set({ showHistory: v }),
-
-  // Active platform filter
   activePlatform: 'all',
   setActivePlatform: (p) => set({ activePlatform: p }),
 
-  // Parse URLs from text — filters by active platform
+  // Parse URLs
   parseUrls: () => {
     const { urls, activePlatform } = get()
     const lines = urls.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 0)
     return lines.filter(l => isSupportedUrlForPlatform(l, activePlatform))
   },
 
-  // ---------- Playlist resolution ----------
-  resolvePlaylist: async (playlistUrl) => {
+  // ─── Health Check ────────────────────────────────────────────────────
+  checkHealth: async () => {
     try {
-      const res = await fetch(buildApiUrl(API_BASE_URL, 'playlist'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: playlistUrl })
-      })
-      if (!res.ok) {
-        await parseApiError(res, `Error ${res.status}`)
-      }
+      const url = buildApiUrl(API_BASE_URL, 'health')
+      const res = await fetch(url, { method: 'GET' })
+      if (!res.ok) return { ok: false, status: res.status }
+      const data = await res.json()
+      return { ok: true, data }
+    } catch {
+      return { ok: false, error: 'unreachable' }
+    }
+  },
+
+  // ─── Playlist Resolution (POST /api/playlist) ────────────────────────
+  resolvePlaylist: async (playlistUrl) => {
+    if (!playlistUrl || typeof playlistUrl !== 'string' || playlistUrl.trim().length === 0) {
+      throw new Error('URL is required')
+    }
+    try {
+      const res = await apiCall('playlist', { url: playlistUrl })
       const data = await res.json()
       if (data.type === 'playlist' && data.videos?.length) {
         return data.videos.map(v => v.url)
@@ -227,42 +236,50 @@ const useStore = create((set, get) => ({
     }
   },
 
-  // ---------- Download a single URL with real progress ----------
+  // ─── Download Single URL (POST /api/info → POST /api/download) ───────
   downloadSingle: async (url, id) => {
     const { format, quality, updateDownload, addToHistory } = get()
 
+    // Validate URL before any network call
+    if (!url || typeof url !== 'string' || url.trim().length === 0) {
+      updateDownload(id, { status: 'error', error: 'La URL está vacía.' })
+      return
+    }
+
     try {
-      // 1. Get info  →  progress 0 → 5 %
-      updateDownload(id, { progress: 2 })
-
-      const infoRes = await fetch(buildApiUrl(API_BASE_URL, 'info'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url })
+      // Step 1: Get video info → progress 0 → 5%
+      // Detect platform for UX-specific status messages
+      const isTiktokUrl = url.includes('tiktok.com') || url.includes('vm.tiktok.com')
+      updateDownload(id, {
+        progress: 2,
+        title: isTiktokUrl ? 'Procesando TikTok...' : 'Obteniendo información...',
       })
 
-      if (!infoRes.ok) {
-        await parseApiError(infoRes, `Error ${infoRes.status} al obtener info`)
-      }
-
+      const infoRes = await apiCall('info', { url })
       const info = await infoRes.json()
-      updateDownload(id, { title: info.title, thumbnail: info.thumbnail, duration: info.duration, progress: 5 })
 
-      // 2. Start download
-      updateDownload(id, { progress: 8 })
-
-      const downloadRes = await fetch(buildApiUrl(DOWNLOAD_BASE_URL, 'download'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, format, quality, title: info.title })
-      })
-
-      if (!downloadRes.ok) {
-        await parseApiError(downloadRes, `Error ${downloadRes.status} en la descarga`)
+      if (import.meta.env.DEV) {
+        console.log(`[download] Got info for "${info.title}" (${info.duration}s)`)
       }
 
-      // 3. Stream the response with real progress
-      //    Use Content-Length if available, otherwise estimate from duration+quality
+      updateDownload(id, {
+        title: info.title,
+        thumbnail: info.thumbnail,
+        duration: info.duration,
+        progress: 5,
+      })
+
+      // Step 2: Start download → progress 8%
+      updateDownload(id, { progress: 8, title: isTiktokUrl ? 'Descargando de TikTok...' : info.title })
+
+      const downloadRes = await apiCall('download', {
+        url,
+        format,
+        quality,
+        title: info.title || '',
+      })
+
+      // Step 3: Stream with progress
       const contentLength = Number(downloadRes.headers.get('Content-Length') || 0)
       const estimated = contentLength > 0
         ? contentLength
@@ -272,7 +289,6 @@ const useStore = create((set, get) => ({
       const chunks = []
       let received = 0
 
-      // Progress range: 10% → 95% during streaming
       const PROGRESS_START = 10
       const PROGRESS_END = 95
 
@@ -284,21 +300,23 @@ const useStore = create((set, get) => ({
 
         let pct
         if (estimated > 0) {
-          // Real or estimated progress
           const ratio = Math.min(received / estimated, 1)
           pct = Math.round(PROGRESS_START + ratio * (PROGRESS_END - PROGRESS_START))
         } else {
-          // No estimate available – asymptotic progress (never reaches 95)
-          // Approaches PROGRESS_END logarithmically as more bytes arrive
           pct = Math.round(PROGRESS_START + (PROGRESS_END - PROGRESS_START) * (1 - 1 / (1 + received / 500000)))
         }
         updateDownload(id, { progress: Math.min(pct, PROGRESS_END) })
       }
 
-      // 4. Build blob and trigger browser download  →  95 → 100 %
+      // ✅ FIX 2 — Validate download integrity before building Blob
+      const MIN_EXPECTED_BYTES = format === 'mp3' ? 50000 : 200000
+      if (received < MIN_EXPECTED_BYTES) {
+        throw new Error('La descarga fue incompleta. Inténtalo de nuevo.')
+      }
+
+      // Step 4: Build blob and trigger download → 95 → 100%
       updateDownload(id, { progress: 97 })
       const blob = new Blob(chunks)
-      // PERF: Release chunk references immediately to free memory for next downloads
       chunks.length = 0
       const filename = `${info.title || 'download'}.${format}`
 
@@ -309,26 +327,57 @@ const useStore = create((set, get) => ({
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
-      // PERF: Delay revokeObjectURL slightly so the browser has time to start the save dialog
       setTimeout(() => window.URL.revokeObjectURL(blobUrl), 5000)
 
       updateDownload(id, { progress: 100, status: 'completed' })
-      addToHistory({ url, title: info.title, format, quality, thumbnail: info.thumbnail })
+      addToHistory({
+        url,
+        title: info.title,
+        format,
+        quality,
+        thumbnail: info.thumbnail,
+      })
+
+      if (import.meta.env.DEV) {
+        console.log(`[download] Completed: "${info.title}"`)
+      }
     } catch (error) {
+      if (import.meta.env.DEV) {
+        console.error(`[download] Failed for "${url}":`, error)
+      }
       updateDownload(id, { status: 'error', error: friendlyError(error) })
     }
   },
 
-  // ---------- Start batch download with concurrency-limited parallelism ----------
+  // ─── Retry a single failed download ──────────────────────────────────
+  retryDownload: async (id) => {
+    const { downloads, downloadSingle, updateDownload } = get()
+    const dl = downloads.find(d => d.id === id)
+    if (!dl || dl.status !== 'error') return
+
+    updateDownload(id, { status: 'downloading', progress: 0, error: null, title: 'Reintentando...' })
+    await downloadSingle(dl.url, id)
+  },
+
+  // ─── Batch Download with Concurrency ─────────────────────────────────
   startBatchDownload: async () => {
-    const { parseUrls, resolvePlaylist, downloadSingle, format, quality, updateDownload, setIsProcessing } = get()
-    let validUrls = parseUrls()
+    const { parseUrls, resolvePlaylist, downloadSingle, format, quality, setIsProcessing, checkHealth } = get()
+    const validUrls = parseUrls()
 
     if (validUrls.length === 0) return
 
+    // Health check before starting batch
+    const health = await checkHealth()
+    if (!health.ok) {
+      console.error('[batch] Backend unavailable. Health check failed:', health)
+      // Still attempt downloads — health endpoint might be blocked by CORS
+    } else if (import.meta.env.DEV) {
+      console.log('[batch] Health check passed:', health.data)
+    }
+
     setIsProcessing(true)
 
-    // Expand playlists into individual video URLs
+    // Expand playlists
     const expandedUrls = []
     for (const url of validUrls) {
       if (isPlaylistUrl(url)) {
@@ -336,7 +385,6 @@ const useStore = create((set, get) => ({
           const videos = await resolvePlaylist(url)
           expandedUrls.push(...videos)
         } catch {
-          // If playlist resolution fails, keep the original URL
           expandedUrls.push(url)
         }
       } else {
@@ -344,16 +392,16 @@ const useStore = create((set, get) => ({
       }
     }
 
-    // Queue all downloads with IDs
+    // Queue with unique IDs
     const entries = expandedUrls.map((url) => {
-      const id = Date.now() + Math.random()
+      const id = crypto.randomUUID()
       set((s) => ({
         downloads: [...s.downloads, { url, title: 'Obteniendo información...', format, quality, id, progress: 0, status: 'downloading' }]
       }))
       return { url, id }
     })
 
-    // PERF: Run downloads with limited concurrency instead of sequentially
+    // Limited concurrency
     const executing = new Set()
     for (const entry of entries) {
       const p = downloadSingle(entry.url, entry.id).then(() => executing.delete(p))

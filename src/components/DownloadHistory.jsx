@@ -59,7 +59,7 @@ export default function DownloadHistory() {
         <AnimatePresence>
           {history.map((item, index) => (
             <motion.div
-              key={`${item.url}-${item.downloadedAt}`}
+              key={item.id}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}

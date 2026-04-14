@@ -1,7 +1,8 @@
+import { memo } from 'react'
 import { motion } from 'framer-motion'
 import { HiMusicalNote, HiCodeBracket } from 'react-icons/hi2'
 
-export default function Footer() {
+export default memo(function Footer() {
   const currentYear = new Date().getFullYear()
 
   return (
@@ -42,4 +43,4 @@ export default function Footer() {
       </div>
     </motion.footer>
   )
-}
+})

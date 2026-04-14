@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { motion } from 'framer-motion'
 import { FaYoutube, FaFacebook, FaInstagram, FaTiktok, FaGlobe } from 'react-icons/fa'
 import useStore, { PLATFORMS } from '../store/useStore'
@@ -12,7 +13,7 @@ const ICON_MAP = {
 
 const allTab = { id: 'all', label: 'Todas', icon: 'FaGlobe', color: '#dc2626' }
 
-export default function PlatformNav() {
+export default memo(function PlatformNav() {
   const activePlatform = useStore((s) => s.activePlatform)
   const setActivePlatform = useStore((s) => s.setActivePlatform)
 
@@ -71,4 +72,4 @@ export default function PlatformNav() {
       </div>
     </nav>
   )
-}
+})

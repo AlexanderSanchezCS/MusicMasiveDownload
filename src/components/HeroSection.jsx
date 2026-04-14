@@ -1,7 +1,8 @@
+import { memo } from 'react'
 import { motion } from 'framer-motion'
 import { HiArrowDown, HiMusicalNote, HiFilm } from 'react-icons/hi2'
 
-export default function HeroSection() {
+export default memo(function HeroSection() {
   return (
     <section className="text-center py-12 sm:py-20 relative">
       {/* Decorative elements */}
@@ -75,4 +76,4 @@ export default function HeroSection() {
       </motion.div>
     </section>
   )
-}
+})

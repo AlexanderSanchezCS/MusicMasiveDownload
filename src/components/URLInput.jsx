@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, memo, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { HiLink, HiPlayCircle, HiXMark, HiMusicalNote, HiFilm, HiSparkles, HiChevronDown } from 'react-icons/hi2'
 import useStore from '../store/useStore'
@@ -21,12 +21,25 @@ const QUALITIES = {
   ],
 }
 
-export default function URLInput() {
-  const { urls, setUrls, parseUrls, startBatchDownload, isProcessing, format, setFormat, quality, setQuality, activePlatform } = useStore()
+export default memo(function URLInput() {
+  const urls = useStore((s) => s.urls)
+  const setUrls = useStore((s) => s.setUrls)
+  const parseUrls = useStore((s) => s.parseUrls)
+  const startBatchDownload = useStore((s) => s.startBatchDownload)
+  const isProcessing = useStore((s) => s.isProcessing)
+  const format = useStore((s) => s.format)
+  const setFormat = useStore((s) => s.setFormat)
+  const quality = useStore((s) => s.quality)
+  const setQuality = useStore((s) => s.setQuality)
+  const activePlatform = useStore((s) => s.activePlatform)
   const [showQuality, setShowQuality] = useState(false)
 
-  const validCount = parseUrls().length
-  const lineCount = urls.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 0).length
+  // PERF: Memoize expensive URL parsing to avoid recalculation on every render
+  const { validCount, lineCount } = useMemo(() => {
+    const lines = urls.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 0)
+    const valid = parseUrls()
+    return { validCount: valid.length, lineCount: lines.length }
+  }, [urls, parseUrls])
   const currentQualities = QUALITIES[format]
   const activeQuality = currentQualities.find(q => q.id === quality) || currentQualities[1]
 
@@ -281,4 +294,4 @@ export default function URLInput() {
       </div>
     </motion.div>
   )
-}
+})

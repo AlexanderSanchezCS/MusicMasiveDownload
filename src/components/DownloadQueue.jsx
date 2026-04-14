@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { HiArrowDown, HiCheck, HiXMark, HiTrash, HiMusicalNote } from 'react-icons/hi2'
 import useStore from '../store/useStore'
@@ -22,9 +22,10 @@ function ProgressBar({ progress, status }) {
   )
 }
 
-// PERF: Memoize individual download items to avoid re-rendering the whole list
+// PERF: Memoize individual download items
 const DownloadItem = memo(function DownloadItem({ download }) {
-  const { removeDownload } = useStore()
+  const removeDownload = useStore((s) => s.removeDownload)
+  const retryDownload = useStore((s) => s.retryDownload)
 
   const statusIcons = {
     pending: <div className="w-4 h-4 border-2 border-gray-600 border-t-red-500 rounded-full animate-spin" />,
@@ -69,12 +70,24 @@ const DownloadItem = memo(function DownloadItem({ download }) {
               <p className="text-white text-sm font-medium truncate">{download.title}</p>
               <p className="text-gray-600 text-xs truncate mt-0.5">{download.url}</p>
             </div>
-            <button
-              onClick={() => removeDownload(download.id)}
-              className="text-gray-700 hover:text-red-500 transition-colors flex-shrink-0 mt-0.5"
-            >
-              <HiTrash className="text-sm" />
-            </button>
+            <div className="flex items-center gap-1 flex-shrink-0 mt-0.5">
+              {download.status === 'error' && (
+                <button
+                  onClick={() => retryDownload(download.id)}
+                  className="text-xs text-red-400 hover:text-red-300 transition-colors px-2 py-1 rounded-lg hover:bg-red-500/10"
+                  aria-label={`Reintentar descarga: ${download.title}`}
+                >
+                  Reintentar
+                </button>
+              )}
+              <button
+                onClick={() => removeDownload(download.id)}
+                className="text-gray-700 hover:text-red-500 transition-colors p-1"
+                aria-label={`Eliminar descarga: ${download.title}`}
+              >
+                <HiTrash className="text-sm" />
+              </button>
+            </div>
           </div>
 
           {/* Status */}
@@ -99,13 +112,17 @@ const DownloadItem = memo(function DownloadItem({ download }) {
   )
 })
 
-export default function DownloadQueue() {
-  const { downloads, clearDownloads } = useStore()
+export default memo(function DownloadQueue() {
+  const downloads = useStore((s) => s.downloads)
+  const clearDownloads = useStore((s) => s.clearDownloads)
 
   if (downloads.length === 0) return null
 
-  const completed = downloads.filter(d => d.status === 'completed').length
-  const errors = downloads.filter(d => d.status === 'error').length
+  // PERF: Memoize stats to avoid recalculation
+  const { completed, errorCount } = useMemo(() => ({
+    completed: downloads.filter(d => d.status === 'completed').length,
+    errorCount: downloads.filter(d => d.status === 'error').length,
+  }), [downloads])
 
   return (
     <motion.div
@@ -123,7 +140,7 @@ export default function DownloadQueue() {
           <div>
             <h3 className="text-white font-semibold text-lg">Cola de descargas</h3>
             <p className="text-gray-500 text-xs">
-              {downloads.length} total • {completed} completado(s) • {errors} error(es)
+              {downloads.length} total • {completed} completado(s) • {errorCount} error(es)
             </p>
           </div>
         </div>
@@ -161,4 +178,4 @@ export default function DownloadQueue() {
       </div>
     </motion.div>
   )
-}
+})

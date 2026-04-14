@@ -20,11 +20,6 @@ const app = express()
 app.set('trust proxy', 1)
 const PORT = process.env.PORT || 4000
 
-// Force redeploy 2026-04-08
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-})
-
 // Security headers via Helmet
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' },
@@ -34,7 +29,7 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'", 'https://va.vercel-scripts.com'],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
-      connectSrc: ["'self'", process.env.FRONTEND_URL || 'https://*.vercel.app', 'https://va.vercel-scripts.com'],
+      connectSrc: ["'self'", 'https://*.railway.app', 'https://*.vercel.app', 'https://va.vercel-scripts.com'],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
@@ -102,6 +97,32 @@ app.use('/api/download', downloadLimiter)
 // Body parser — SECURITY: 1 MB is more than enough for JSON payloads with URLs
 app.use(express.json({ limit: '1mb' }))
 
+// ✅ FIX 9 — Conditional request logger: skip body logging for /download routes
+app.use((req, res, next) => {
+  const start = Date.now()
+  const isDownload = req.path.includes('/download')
+
+  // Only log body for non-download endpoints (small payloads)
+  if (!isDownload) {
+    const bodySummary = req.method === 'POST' && req.body
+      ? JSON.stringify(req.body).slice(0, 200)
+      : req.method === 'GET'
+        ? JSON.stringify(req.query).slice(0, 200)
+        : '(no body)'
+    console.log(`[req] ${req.method} ${req.originalUrl} | Body: ${bodySummary}`)
+  }
+
+  res.on('finish', () => {
+    const duration = Date.now() - start
+    // Only log finish for non-downloads or slow operations (>5s)
+    if (!isDownload || duration > 5000) {
+      console.log(`[res] ${req.method} ${req.originalUrl} → ${res.statusCode} (${duration}ms)`)
+    }
+  })
+
+  next()
+})
+
 // Global request timeout (5 minutes — downloads of large files need more time)
 app.use((req, res, next) => {
   const timeout = req.path.includes('/download') ? 300000 : 120000
@@ -143,4 +164,9 @@ app.use((err, req, res, next) => {
     error: 'Error interno del servidor',
     ...(process.env.NODE_ENV === 'development' && { message: err.message }),
   })
+})
+
+// ✅ FIX 1 — app.listen() AFTER all middlewares and routes are registered
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`)
 })
