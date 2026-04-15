@@ -65,6 +65,7 @@ async function apiCall(endpoint, body, baseUrl = API_BASE_URL) {
 const MAX_CONCURRENT = 3
 const MAX_HISTORY = 500
 const MAX_LOCALSTORAGE_BYTES = 5 * 1024 * 1024 // 5 MB safety limit
+const MAX_URLS_PER_BATCH = 20 // ✅ Maximum URLs per download batch
 
 export const PLATFORMS = [
   { id: 'youtube',   label: 'YouTube',   icon: 'FaYoutube',   color: '#FF0000', hosts: ['youtube.com', 'youtu.be', 'www.youtube.com', 'm.youtube.com'] },
@@ -110,7 +111,7 @@ function friendlyError(error) {
 }
 
 // ─── URL Helpers ─────────────────────────────────────────────────────────
-function isSupportedUrlForPlatform(url, platformId) {
+export function isSupportedUrlForPlatform(url, platformId) {
   if (platformId === 'all') {
     try { const u = new URL(url); return ALL_HOSTS.some(h => u.hostname === h || u.hostname.endsWith('.' + h)) } catch { return false }
   }
@@ -332,7 +333,8 @@ const useStore = create((set, get) => ({
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
-      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 5000)
+      // ✅ FIX 3 — Revoke immediately after click to prevent memory leak
+      requestAnimationFrame(() => window.URL.revokeObjectURL(blobUrl))
 
       updateDownload(id, { progress: 100, status: 'completed' })
       addToHistory({
@@ -366,10 +368,15 @@ const useStore = create((set, get) => ({
 
   // ─── Batch Download with Concurrency ─────────────────────────────────
   startBatchDownload: async () => {
-    const { parseUrls, resolvePlaylist, downloadSingle, format, quality, setIsProcessing, checkHealth } = get()
+    const { parseUrls, resolvePlaylist, downloadSingle, format, quality, setIsProcessing, checkHealth, urls } = get()
     const validUrls = parseUrls()
 
     if (validUrls.length === 0) return
+
+    // ✅ FIX 7 — Limit maximum URLs per batch
+    if (validUrls.length > MAX_URLS_PER_BATCH) {
+      throw new Error(`Máximo ${MAX_URLS_PER_BATCH} URLs por lote. Has ingresado ${validUrls.length}.`)
+    }
 
     // Health check before starting batch
     const health = await checkHealth()
@@ -406,16 +413,18 @@ const useStore = create((set, get) => ({
       return { url, id }
     })
 
-    // Limited concurrency
+    // ✅ FIX 2 — Race condition: proper error handling and cleanup
     const executing = new Set()
     for (const entry of entries) {
-      const p = downloadSingle(entry.url, entry.id).then(() => executing.delete(p))
+      const p = downloadSingle(entry.url, entry.id)
+        .catch(() => {}) // Avoids throw breaking the Set
+        .finally(() => executing.delete(p)) // Always cleans up
       executing.add(p)
       if (executing.size >= MAX_CONCURRENT) {
         await Promise.race(executing)
       }
     }
-    await Promise.all(executing)
+    await Promise.allSettled(executing) // Waits all at the end
 
     setIsProcessing(false)
   },

@@ -4,7 +4,9 @@ import useStore from '../store/useStore'
 import toast from 'react-hot-toast'
 
 export default function DownloadHistory() {
-  const { history, clearHistory } = useStore()
+  // ✅ FIX 4 — Use individual selectors to prevent unnecessary re-renders
+  const history = useStore((s) => s.history)
+  const clearHistory = useStore((s) => s.clearHistory)
 
   const handleClearHistory = () => {
     clearHistory()

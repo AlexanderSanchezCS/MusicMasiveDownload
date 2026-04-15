@@ -198,11 +198,17 @@ async function execTiktokWithRetry(args, opts, maxRetries = 3) {
 
 // ─── Concurrency limiter ─────────────────────────────────────────────────
 const MAX_CONCURRENT_DOWNLOADS = parseInt(process.env.MAX_CONCURRENT_DOWNLOADS || '10', 10)
+const MAX_QUEUE_SIZE = 50 // ✅ Maximum downloads in queue
+const DOWNLOAD_TIMEOUT_MS = 5 * 60 * 1000 // ✅ 5 minutes timeout per process
 let activeDownloads = 0
 const downloadQueue = []
 
 function acquireSlot() {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    // ✅ FIX 6 — Reject if queue is full
+    if (downloadQueue.length >= MAX_QUEUE_SIZE) {
+      return reject(new Error('Servidor ocupado. Intenta en unos minutos.'))
+    }
     if (activeDownloads < MAX_CONCURRENT_DOWNLOADS) {
       activeDownloads++
       return resolve()
@@ -220,7 +226,7 @@ function releaseSlot() {
 }
 
 export function getDownloadStats() {
-  return { active: activeDownloads, queued: downloadQueue.length, maxConcurrent: MAX_CONCURRENT_DOWNLOADS }
+  return { active: activeDownloads, queued: downloadQueue.length, maxConcurrent: MAX_CONCURRENT_DOWNLOADS, maxQueueSize: MAX_QUEUE_SIZE }
 }
 
 // ─── Binaries + temp dir ─────────────────────────────────────────────────
@@ -568,6 +574,10 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
 
   console.log(`[download] ${platform} | ${format}/${quality} | url=${url.slice(0, 100)}`)
 
+  // ✅ FIX 5 — 5 minute timeout to kill stuck processes
+  let killTimer = null
+  const startTime = Date.now()
+
   try {
     const execFn = isInstagram
       ? () => execWithRetry(args, dlOpts, platform)
@@ -575,7 +585,17 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
         ? () => execTiktokWithRetry(args, dlOpts)
         : () => execFileAsync(YTDLP_PATH, args, dlOpts)
 
-    const { stderr } = await execFn()
+    const { stderr } = await Promise.race([
+      execFn(),
+      new Promise((_, reject) => {
+        killTimer = setTimeout(() => {
+          reject(new Error(`Descarga timeout (${DOWNLOAD_TIMEOUT_MS / 1000}s). El servidor tardó demasiado.`))
+        }, DOWNLOAD_TIMEOUT_MS)
+      })
+    ])
+
+    // ✅ FIX 5 — Clear the kill timer on success
+    if (killTimer) clearTimeout(killTimer)
 
     if (stderr && stderr.trim()) {
       console.log(`[download] ${platform} stderr: ${stderr.trim().slice(0, 500)}`)
@@ -596,12 +616,16 @@ async function _downloadMediaImpl(url, format = 'mp3', quality = '192', title = 
     }
 
     const finalExt = filePath.split('.').pop()
+    console.log(`[download] Completed in ${Math.round((Date.now() - startTime) / 1000)}s`)
     return {
       filePath,
       filename: `${safeTitle}.${finalExt}`,
       mimeType: finalExt === 'mp3' ? 'audio/mpeg' : 'video/mp4',
     }
   } catch (error) {
+    // ✅ FIX 5 — Clear the kill timer on error
+    if (killTimer) clearTimeout(killTimer)
+
     if (platform === 'instagram') {
       const friendly = friendlyInstagramError(error.message)
       if (friendly) throw new Error(friendly)

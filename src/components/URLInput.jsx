@@ -1,7 +1,7 @@
 import { useState, memo, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { HiLink, HiPlayCircle, HiXMark, HiMusicalNote, HiFilm, HiSparkles, HiChevronDown } from 'react-icons/hi2'
-import useStore from '../store/useStore'
+import useStore, { isSupportedUrlForPlatform } from '../store/useStore'
 import toast from 'react-hot-toast'
 
 const QUALITIES = {
@@ -34,12 +34,12 @@ export default memo(function URLInput() {
   const activePlatform = useStore((s) => s.activePlatform)
   const [showQuality, setShowQuality] = useState(false)
 
-  // PERF: Memoize expensive URL parsing to avoid recalculation on every render
+  // ✅ FIX 1 — React #310: Inline URL filtering with activePlatform as dependency
   const { validCount, lineCount } = useMemo(() => {
     const lines = urls.split(/[\n,]+/).map(l => l.trim()).filter(l => l.length > 0)
-    const valid = parseUrls()
+    const valid = lines.filter(l => isSupportedUrlForPlatform(l, activePlatform))
     return { validCount: valid.length, lineCount: lines.length }
-  }, [urls, parseUrls])
+  }, [urls, activePlatform])
   const currentQualities = QUALITIES[format]
   const activeQuality = currentQualities.find(q => q.id === quality) || currentQualities[1]
 
@@ -70,13 +70,20 @@ export default memo(function URLInput() {
   const platformConfig = PLATFORM_CONFIG[activePlatform] || PLATFORM_CONFIG.youtube
   const platformLabel = ` de ${activePlatform.charAt(0).toUpperCase() + activePlatform.slice(1)}`
 
-  const handleDownload = () => {
+  const handleDownload = async () => {
     if (validCount === 0) {
       toast.error('Ingresa al menos un link válido')
       return
     }
-    toast.success(`Iniciando descarga de ${validCount} video(s)...`)
-    startBatchDownload()
+    try {
+      await startBatchDownload()
+    } catch (error) {
+      if (error.message?.includes('Máximo')) {
+        toast.error(error.message)
+      } else {
+        toast.error(error.message || 'Error al iniciar descargas')
+      }
+    }
   }
 
   return (
@@ -269,7 +276,7 @@ export default memo(function URLInput() {
             whileHover={{ scale: 1.01 }}
             whileTap={{ scale: 0.98 }}
             onClick={handleDownload}
-            disabled={isProcessing || validCount === 0}
+            disabled={isProcessing}
             aria-label={isProcessing ? 'Procesando descargas' : `Descargar ${validCount} video(s)`}
             aria-busy={isProcessing}
             className={`w-full py-3.5 rounded-xl text-white font-semibold text-sm flex items-center justify-center gap-2.5 transition-all duration-300 ${
