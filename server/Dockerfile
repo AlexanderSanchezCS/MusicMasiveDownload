@@ -19,11 +19,8 @@ RUN yt-dlp --version && ffmpeg -version
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci --only=production
-
-COPY server/ ./server/
 COPY . .
+RUN npm ci --only=production
 
 ENV YTDLP_PATH=/usr/local/bin/yt-dlp
 ENV NODE_ENV=production
