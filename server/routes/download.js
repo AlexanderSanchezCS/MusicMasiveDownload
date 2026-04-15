@@ -85,7 +85,6 @@ async function handleInfo(req, res) {
     })
   }
 }
-}
 
 // ─── Shared POST handler for /download ───────────────────────────────────
 async function handleDownload(req, res) {
