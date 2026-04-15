@@ -12,6 +12,9 @@ const execFileAsync = promisify(execFile)
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+// ─── Binaries + temp dir ─────────────────────────────────────────────────
+const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
+
 // ─── Startup diagnostics ────────────────────────────────────────────────
 ;(async function startupCheck() {
   try {
@@ -241,7 +244,6 @@ export function getDownloadStats() {
 }
 
 // ─── Binaries + temp dir ─────────────────────────────────────────────────
-const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
 const FFMPEG_DIR = join(__dirname, '..', 'bin')
 const HAS_LOCAL_FFMPEG = existsSync(join(FFMPEG_DIR, 'ffmpeg.exe')) || existsSync(join(FFMPEG_DIR, 'ffmpeg'))
 
