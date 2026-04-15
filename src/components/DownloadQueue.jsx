@@ -116,13 +116,13 @@ export default memo(function DownloadQueue() {
   const downloads = useStore((s) => s.downloads)
   const clearDownloads = useStore((s) => s.clearDownloads)
 
-  if (downloads.length === 0) return null
-
   // PERF: Memoize stats to avoid recalculation
   const { completed, errorCount } = useMemo(() => ({
     completed: downloads.filter(d => d.status === 'completed').length,
     errorCount: downloads.filter(d => d.status === 'error').length,
   }), [downloads])
+
+  if (downloads.length === 0) return null
 
   return (
     <motion.div
