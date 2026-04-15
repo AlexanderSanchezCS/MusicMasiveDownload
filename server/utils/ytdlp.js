@@ -12,6 +12,17 @@ const execFileAsync = promisify(execFile)
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+// ─── Startup diagnostics ────────────────────────────────────────────────
+;(async function startupCheck() {
+  try {
+    const { stdout } = await execFileAsync(YTDLP_PATH, ['--version'])
+    console.log(`[startup] ✓ yt-dlp version: ${stdout.trim()}`)
+  } catch (err) {
+    console.error(`[startup] ✗ yt-dlp NOT FOUND at "${YTDLP_PATH}":`, err.message)
+    console.error('[startup] Install: npm install -g yt-dlp && export PATH="$PATH:$(npm root -g)/yt-dlp"')
+  }
+})()
+
 // ─── Instagram cookies ────────────────────────────────────────────────────
 const IG_COOKIES_PATH = join(tmpdir(), 'ig_cookies.txt')
 ;(function initInstagramCookies() {

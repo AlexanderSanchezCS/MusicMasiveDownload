@@ -62,19 +62,29 @@ async function handleInfo(req, res) {
   try {
     const info = await getVideoInfo(incomingUrl)
     console.log(`[POST /api/info] 200 — "${info.title || 'unknown'}" (${info.duration}s)`)
-    // ✅ FIX 6 — HTTP cache headers to reduce redundant requests
+    // ✅ Fix 6 — HTTP cache headers to reduce redundant requests
     res.set('Cache-Control', 'public, max-age=180, stale-while-revalidate=30')
     res.set('ETag', `"${Buffer.from(incomingUrl).toString('base64url')}"`)
     res.json(info)
   } catch (error) {
     console.error('[POST /api/info] 500 —', error.message)
+
+    // Better error messages
+    let userMessage = 'No se pudo obtener información del video'
+    if (error.message?.includes('yt-dlp') || error.message?.includes('ENOENT')) {
+      userMessage = 'Herramienta de descarga no disponible. Contacta al administrador.'
+    } else if (error.message?.includes('timeout') || error.message?.includes('timed out')) {
+      userMessage = 'La solicitud tardó demasiado. Verifica que el video sea público e intenta de nuevo.'
+    }
+
     // Dev mode: include stack trace
     const isDev = process.env.NODE_ENV === 'development'
     res.status(500).json({
-      error: 'No se pudo obtener información del video',
+      error: userMessage,
       ...(isDev && { message: error.message, stack: error.stack }),
     })
   }
+}
 }
 
 // ─── Shared POST handler for /download ───────────────────────────────────
