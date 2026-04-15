@@ -1,31 +1,32 @@
-FROM node:20-slim
+FROM node:22-slim
 
-# Install yt-dlp, ffmpeg, and curl (for health checks)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Instalar dependencias del sistema
+RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     ffmpeg \
     curl \
-    && pip3 install --break-system-packages yt-dlp \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
 
-# Verify yt-dlp installation
-RUN yt-dlp --version
+# Instalar yt-dlp
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    -o /usr/local/bin/yt-dlp && \
+    chmod a+rx /usr/local/bin/yt-dlp
+
+# Verificar instalación
+RUN yt-dlp --version && ffmpeg -version
 
 WORKDIR /app
 
-# Copy package files and install
-COPY package.json package-lock.json* ./
-RUN npm install --production
+COPY package*.json ./
+RUN npm ci --only=production
 
-# Copy only necessary server files
-COPY index.js ./
-COPY routes/ ./routes/
-COPY utils/ ./utils/
+COPY server/ ./server/
+COPY . .
 
-# Expose port 8080 (Railway default)
+ENV YTDLP_PATH=/usr/local/bin/yt-dlp
+ENV NODE_ENV=production
+
 EXPOSE 8080
-
-# Start server
-CMD ["node", "index.js"]
+CMD ["node", "server/index.js"]
