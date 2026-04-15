@@ -18,7 +18,7 @@ const app = express()
 // Trust proxy — set to the number of trusted reverse proxies (Railway/Vercel = 1)
 // SECURITY: Do NOT set to `true` (trusts all proxies → rate-limit bypass via X-Forwarded-For)
 app.set('trust proxy', 1)
-const PORT = process.env.PORT || 4000
+const PORT = process.env.PORT || 8080
 
 // Security headers via Helmet
 app.use(helmet({
