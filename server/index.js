@@ -6,7 +6,7 @@ import dotenv from 'dotenv'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import downloadRouter from './routes/download.js'
-import { getDownloadStats } from './utils/ytdlp.js'
+
 
 dotenv.config()
 
