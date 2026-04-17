@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { Readable } from 'stream'
-import { getVideoInfo, downloadMedia, getDirectUrl } from '../utils/ytdlp.js'
+import { getVideoInfo } from '../utils/ytdlp.js'
 
 const router = Router()
 
