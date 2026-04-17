@@ -1,48 +1,147 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { existsSync, mkdirSync, readdirSync } from 'fs'
+import { join, dirname } from 'path'
+import { tmpdir } from 'os'
+import { randomUUID } from 'crypto'
+import { fileURLToPath } from 'url'
 
-const YTDLP_PATH = process.env.YTDLP_PATH || '/usr/local/bin/yt-dlp';
+const execFileAsync = promisify(execFile)
 
-export async function getVideoInfo(url) {
-  return new Promise((resolve, reject) => {
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
 
-    const command = `${YTDLP_PATH} -j --no-warnings --no-playlist "${url}"`;
+const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
+const FFMPEG_CANDIDATES = [
+  join(__dirname, '..', 'bin', 'ffmpeg-master-latest-win64-gpl', 'bin'),
+  join(__dirname, '..', 'bin'),
+]
+const FFMPEG_LOCATION = FFMPEG_CANDIDATES.find((dir) =>
+  existsSync(join(dir, 'ffmpeg.exe')) || existsSync(join(dir, 'ffmpeg'))
+)
 
-    const process = exec(command, { timeout: 20000 }, (error, stdout, stderr) => {
+const TEMP_DIR = join(tmpdir(), 'musicmasivedownload')
+if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true })
 
-      if (error) {
-        console.error('❌ yt-dlp exec error:', error.message);
-        console.error('stderr:', stderr);
-        return reject(new Error('yt-dlp execution failed'));
-      }
+function parseJsonFromStdout(stdout) {
+  if (!stdout) return null
+  const jsonStart = stdout.indexOf('{')
+  const jsonEnd = stdout.lastIndexOf('}')
+  if (jsonStart === -1 || jsonEnd === -1) return null
+  const cleanJson = stdout.slice(jsonStart, jsonEnd + 1)
+  return JSON.parse(cleanJson)
+}
 
-      if (!stdout) {
-        return reject(new Error('yt-dlp returned empty response'));
-      }
+function mapVideoInfo(data) {
+  return {
+    type: 'video',
+    id: data.id,
+    title: data.title,
+    duration: data.duration,
+    thumbnail: data.thumbnail || data.thumbnails?.[data.thumbnails.length - 1]?.url,
+    uploader: data.uploader,
+    view_count: data.view_count,
+  }
+}
 
+export async function getVideoInfo(url, isPlaylist = false) {
+  const args = ['--dump-json', '--no-warnings', isPlaylist ? '--yes-playlist' : '--no-playlist']
+
+  if (isPlaylist) args.push('--flat-playlist')
+  args.push(url)
+
+  const { stdout, stderr } = await execFileAsync(YTDLP_PATH, args, {
+    timeout: isPlaylist ? 30000 : 20000,
+    maxBuffer: 5 * 1024 * 1024,
+  })
+
+  if (stderr && stderr.trim()) {
+    console.log(`[yt-dlp] stderr: ${stderr.trim().slice(0, 500)}`)
+  }
+
+  if (isPlaylist) {
+    const lines = stdout.trim().split('\n').filter((line) => line.trim())
+    const videos = lines.map((line) => {
       try {
-        // 🔥 FIX: limpiar salida (yt-dlp a veces mezcla logs con JSON)
-        const jsonStart = stdout.indexOf('{');
-        const jsonEnd = stdout.lastIndexOf('}');
-
-        if (jsonStart === -1 || jsonEnd === -1) {
-          throw new Error('Invalid JSON output');
+        const data = JSON.parse(line)
+        return {
+          id: data.id,
+          title: data.title,
+          url: data.url || data.webpage_url || `https://www.youtube.com/watch?v=${data.id}`,
+          duration: data.duration,
+          thumbnail: data.thumbnail || data.thumbnails?.[0]?.url,
         }
-
-        const cleanJson = stdout.slice(jsonStart, jsonEnd + 1);
-        const data = JSON.parse(cleanJson);
-
-        resolve(data);
-
-      } catch (err) {
-        console.error('❌ JSON parse error:', err.message);
-        console.error('RAW OUTPUT:', stdout);
-        reject(new Error('Error parsing yt-dlp response'));
+      } catch {
+        return null
       }
-    });
+    }).filter(Boolean)
 
-    // 🔥 EXTRA: kill si se cuelga
-    setTimeout(() => {
-      process.kill();
-    }, 25000);
-  });
+    return { type: 'playlist', videos, count: videos.length }
+  }
+
+  const data = parseJsonFromStdout(stdout)
+  if (!data) throw new Error('Invalid JSON output')
+  return mapVideoInfo(data)
+}
+
+function getAudioQuality(quality) {
+  const map = { '128': '5', '192': '2', '256': '1', '320': '0' }
+  return map[quality] || '2'
+}
+
+function getVideoQuality(quality) {
+  const map = {
+    '360': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
+    '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
+    '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
+    '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
+    '1440': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
+    '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
+  }
+  return map[quality] || map['720']
+}
+
+export async function downloadMedia(url, format = 'mp3', quality = '192', title = '') {
+  const id = randomUUID()
+  const outputTemplate = join(TEMP_DIR, `${id}.%(ext)s`)
+
+  const args = ['--no-warnings', '--no-playlist']
+
+  if (FFMPEG_LOCATION) {
+    args.push('--ffmpeg-location', FFMPEG_LOCATION)
+  }
+
+  if (format === 'mp3') {
+    args.push('-x', '--audio-format', 'mp3', '--audio-quality', getAudioQuality(quality))
+  } else {
+    args.push('-f', getVideoQuality(quality), '--merge-output-format', 'mp4')
+  }
+
+  args.push('-o', outputTemplate, url)
+
+  await execFileAsync(YTDLP_PATH, args, {
+    timeout: format === 'mp4' ? 10 * 60 * 1000 : 5 * 60 * 1000,
+    maxBuffer: 10 * 1024 * 1024,
+  })
+
+  const ext = format === 'mp3' ? 'mp3' : 'mp4'
+  let filePath = join(TEMP_DIR, `${id}.${ext}`)
+
+  if (!existsSync(filePath)) {
+    const files = readdirSync(TEMP_DIR).filter((f) => f.startsWith(id))
+    if (files.length > 0) {
+      filePath = join(TEMP_DIR, files[0])
+    } else {
+      throw new Error('Downloaded file not found')
+    }
+  }
+
+  const safeTitle = title && title.trim() ? title.trim() : 'download'
+  const finalExt = filePath.split('.').pop()
+
+  return {
+    filePath,
+    filename: `${safeTitle}.${finalExt}`,
+    mimeType: finalExt === 'mp3' ? 'audio/mpeg' : 'video/mp4',
+  }
 }
