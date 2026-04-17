@@ -65,7 +65,10 @@ async function handleInfo(req, res) {
     res.json(info)
   } catch (error) {
     console.error('[POST /api/info] 500 -', error.message)
-    res.status(500).json({ error: 'No se pudo obtener informacion del video' })
+    res.status(500).json({
+      error: 'No se pudo obtener informacion del video',
+      message: error.message,
+    })
   }
 }
 

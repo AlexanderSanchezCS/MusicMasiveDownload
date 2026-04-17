@@ -50,10 +50,35 @@ export async function getVideoInfo(url, isPlaylist = false) {
   if (isPlaylist) args.push('--flat-playlist')
   args.push(url)
 
-  const { stdout, stderr } = await execFileAsync(YTDLP_PATH, args, {
-    timeout: isPlaylist ? 30000 : 20000,
-    maxBuffer: 5 * 1024 * 1024,
-  })
+  let stdout = ''
+  let stderr = ''
+  try {
+    const result = await execFileAsync(YTDLP_PATH, args, {
+      timeout: isPlaylist ? 30000 : 20000,
+      maxBuffer: 5 * 1024 * 1024,
+    })
+    stdout = result.stdout
+    stderr = result.stderr
+  } catch (error) {
+    stderr = error?.stderr || ''
+    const msg = error?.message || ''
+    const combined = `${msg}\n${stderr}`
+
+    if (combined.includes('This video is unavailable')) {
+      throw new Error('Este video no esta disponible o es privado.')
+    }
+    if (combined.includes('Sign in to confirm') || combined.includes('age')) {
+      throw new Error('Este video requiere confirmacion de edad o inicio de sesion.')
+    }
+    if (combined.includes('Private video')) {
+      throw new Error('Este video es privado y no se puede descargar.')
+    }
+    if (combined.includes('HTTP Error 429') || combined.includes('Too Many Requests')) {
+      throw new Error('YouTube esta limitando solicitudes. Espera unos minutos e intenta de nuevo.')
+    }
+
+    throw new Error('No se pudo obtener informacion del video.')
+  }
 
   if (stderr && stderr.trim()) {
     console.log(`[yt-dlp] stderr: ${stderr.trim().slice(0, 500)}`)

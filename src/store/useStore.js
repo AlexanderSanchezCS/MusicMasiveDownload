@@ -97,6 +97,15 @@ function friendlyError(error) {
   if (msg.includes('Command failed') || msg.includes('yt-dlp') || msg.includes('ffmpeg')) {
     return 'No se pudo procesar este enlace. Verifica que el video sea público y el link sea correcto.'
   }
+  if (msg.includes('no esta disponible') || msg.includes('no está disponible')) {
+    return 'Este video no está disponible, es privado o tiene restricciones.'
+  }
+  if (msg.includes('confirmacion de edad') || msg.includes('inicio de sesion')) {
+    return 'Este video requiere confirmación de edad o inicio de sesión.'
+  }
+  if (msg.includes('YouTube esta limitando')) {
+    return 'YouTube está limitando solicitudes. Espera unos minutos e intenta de nuevo.'
+  }
   if (msg === 'URL is required') {
     return 'La URL está vacía. Ingresa un link válido.'
   }
@@ -352,7 +361,12 @@ const useStore = create((set, get) => ({
       if (import.meta.env.DEV) {
         console.error(`[download] Failed for "${url}":`, error)
       }
-      updateDownload(id, { status: 'error', error: friendlyError(error) })
+      updateDownload(id, {
+        status: 'error',
+        error: friendlyError(error),
+        title: 'No disponible',
+        progress: 0,
+      })
     }
   },
 
