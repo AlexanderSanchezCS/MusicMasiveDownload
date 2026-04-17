@@ -136,11 +136,9 @@ app.use((req, res, next) => {
 
 // Health check — includes download queue stats for monitoring
 app.get('/api/health', (req, res) => {
-  const stats = getDownloadStats()
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    downloads: stats,
     uptime: Math.round(process.uptime()),
     memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
   })
