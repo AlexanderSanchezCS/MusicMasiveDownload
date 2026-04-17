@@ -23,6 +23,21 @@ const FFMPEG_LOCATION = FFMPEG_CANDIDATES.find((dir) =>
 const TEMP_DIR = join(tmpdir(), 'musicmasivedownload')
 if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true })
 
+function cleanYoutubeUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl)
+    if (!u.hostname.includes('youtube') && !u.hostname.includes('youtu.be')) return rawUrl
+    // Keep only video id for standard URLs
+    if (u.searchParams.has('v')) {
+      const v = u.searchParams.get('v')
+      return `https://www.youtube.com/watch?v=${v}`
+    }
+  } catch {
+    return rawUrl
+  }
+  return rawUrl
+}
+
 function parseJsonFromStdout(stdout) {
   if (!stdout) return null
   const jsonStart = stdout.indexOf('{')
@@ -45,6 +60,7 @@ function mapVideoInfo(data) {
 }
 
 export async function getVideoInfo(url, isPlaylist = false) {
+  url = cleanYoutubeUrl(url)
   const args = ['--dump-json', '--no-warnings', isPlaylist ? '--yes-playlist' : '--no-playlist']
 
   if (isPlaylist) args.push('--flat-playlist')
@@ -127,6 +143,7 @@ function getVideoQuality(quality) {
 }
 
 export async function downloadMedia(url, format = 'mp3', quality = '192', title = '') {
+  url = cleanYoutubeUrl(url)
   const id = randomUUID()
   const outputTemplate = join(TEMP_DIR, `${id}.%(ext)s`)
 

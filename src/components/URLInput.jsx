@@ -1,4 +1,4 @@
-import { useState, memo, useMemo } from 'react'
+import { useEffect, useRef, useState, memo, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { HiLink, HiPlayCircle, HiXMark, HiMusicalNote, HiFilm, HiSparkles, HiChevronDown } from 'react-icons/hi2'
 import useStore, { isSupportedUrlForPlatform } from '../store/useStore'
@@ -32,6 +32,7 @@ export default memo(function URLInput() {
   const setQuality = useStore((s) => s.setQuality)
   const activePlatform = useStore((s) => s.activePlatform)
   const [showQuality, setShowQuality] = useState(false)
+  const qualityRef = useRef(null)
 
   const parsed = useMemo(() => {
     const lines = urls.split(/[\n,]+/).map((l) => l.trim()).filter((l) => l.length > 0)
@@ -55,12 +56,30 @@ export default memo(function URLInput() {
 
   const currentQuality = QUALITIES[format].find((q) => q.id === quality) || QUALITIES[format][0]
 
+  useEffect(() => {
+    if (!showQuality) return
+    const handleClickOutside = (event) => {
+      if (qualityRef.current && !qualityRef.current.contains(event.target)) {
+        setShowQuality(false)
+      }
+    }
+    const handleEscape = (event) => {
+      if (event.key === 'Escape') setShowQuality(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleEscape)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleEscape)
+    }
+  }, [showQuality])
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: 0.5 }}
-      className="glass rounded-2xl p-6 sm:p-8"
+      className="glass rounded-2xl p-6 sm:p-8 relative z-20"
     >
       <div className="space-y-6">
         <div className="relative">
@@ -119,7 +138,7 @@ export default memo(function URLInput() {
             </button>
           </div>
 
-          <div className="relative">
+          <div className="relative" ref={qualityRef}>
             <button
               type="button"
               onClick={() => setShowQuality((s) => !s)}
@@ -138,7 +157,7 @@ export default memo(function URLInput() {
                   initial={{ opacity: 0, y: -8 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -8 }}
-                  className="absolute z-20 mt-2 w-full rounded-xl glass p-2"
+                  className="absolute z-50 mt-2 w-full rounded-xl glass p-2"
                 >
                   {QUALITIES[format].map((q) => (
                     <button
