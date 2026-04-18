@@ -80,6 +80,12 @@ export async function getVideoInfo(url, isPlaylist = false) {
     const msg = error?.message || ''
     const combined = `${msg}\n${stderr}`
 
+    console.error('[yt-dlp error]', {
+      message: error?.message,
+      stderr: error?.stderr,
+      stdout: error?.stdout,
+    })
+
     if (combined.includes('This video is unavailable')) {
       throw new Error('Este video no esta disponible o es privado.')
     }
