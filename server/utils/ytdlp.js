@@ -16,7 +16,6 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
-const YTDLP_PROXY = process.env.YTDLP_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || ''
 const YTDLP_YT_CLIENTS = process.env.YTDLP_YT_CLIENTS || 'mweb,web_safari,tv'
 const FFMPEG_CANDIDATES = [
   join(__dirname, '..', 'bin', 'ffmpeg-master-latest-win64-gpl', 'bin'),
@@ -51,10 +50,6 @@ const buildArgs = (url, extraArgs = []) => {
     '--no-warnings',
     '--no-playlist',
   ]
-
-  if (YTDLP_PROXY) {
-    args.push('--proxy', YTDLP_PROXY)
-  }
 
   if (existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH)
