@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { existsSync, mkdirSync, readdirSync } from 'fs'
+import { writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
@@ -22,6 +22,38 @@ const FFMPEG_LOCATION = FFMPEG_CANDIDATES.find((dir) =>
 
 const TEMP_DIR = join(tmpdir(), 'musicmasivedownload')
 if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true })
+
+const COOKIES_PATH = join(dirname(fileURLToPath(import.meta.url)), 'cookies.txt')
+
+if (process.env.YOUTUBE_COOKIES_B64) {
+  try {
+    const cookiesContent = Buffer.from(
+      process.env.YOUTUBE_COOKIES_B64, 'base64'
+    ).toString('utf-8')
+    writeFileSync(COOKIES_PATH, cookiesContent)
+    console.log('[ytdlp] ✅ Cookies escritas correctamente')
+    console.log('[ytdlp] Primeros 50 chars:', cookiesContent.substring(0, 50))
+  } catch (err) {
+    console.error('[ytdlp] ❌ Error con cookies:', err.message)
+  }
+} else {
+  console.warn('[ytdlp] ⚠️ No hay YOUTUBE_COOKIES_B64 configurada')
+}
+
+const buildArgs = (url, extraArgs = []) => {
+  const args = [
+    '--no-warnings',
+    '--no-playlist',
+  ]
+
+  if (existsSync(COOKIES_PATH)) {
+    args.push('--cookies', COOKIES_PATH)
+  }
+
+  args.push('--extractor-args', 'youtube:player_client=mweb')
+
+  return [...args, ...extraArgs, url]
+}
 
 function cleanYoutubeUrl(rawUrl) {
   try {
@@ -61,10 +93,10 @@ function mapVideoInfo(data) {
 
 export async function getVideoInfo(url, isPlaylist = false) {
   url = cleanYoutubeUrl(url)
-  const args = ['--dump-json', '--no-warnings', isPlaylist ? '--yes-playlist' : '--no-playlist']
+  const extraArgs = ['--dump-json', isPlaylist ? '--yes-playlist' : '--no-playlist']
 
-  if (isPlaylist) args.push('--flat-playlist')
-  args.push(url)
+  if (isPlaylist) extraArgs.push('--flat-playlist')
+  const args = buildArgs(url, extraArgs)
 
   let stdout = ''
   let stderr = ''
@@ -153,19 +185,20 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
   const id = randomUUID()
   const outputTemplate = join(TEMP_DIR, `${id}.%(ext)s`)
 
-  const args = ['--no-warnings', '--no-playlist']
+  const extraArgs = []
 
   if (FFMPEG_LOCATION) {
-    args.push('--ffmpeg-location', FFMPEG_LOCATION)
+    extraArgs.push('--ffmpeg-location', FFMPEG_LOCATION)
   }
 
   if (format === 'mp3') {
-    args.push('-x', '--audio-format', 'mp3', '--audio-quality', getAudioQuality(quality))
+    extraArgs.push('-x', '--audio-format', 'mp3', '--audio-quality', getAudioQuality(quality))
   } else {
-    args.push('-f', getVideoQuality(quality), '--merge-output-format', 'mp4')
+    extraArgs.push('-f', getVideoQuality(quality), '--merge-output-format', 'mp4')
   }
 
-  args.push('-o', outputTemplate, url)
+  extraArgs.push('-o', outputTemplate)
+  const args = buildArgs(url, extraArgs)
 
   await execFileAsync(YTDLP_PATH, args, {
     timeout: format === 'mp4' ? 10 * 60 * 1000 : 5 * 60 * 1000,
