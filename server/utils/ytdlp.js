@@ -1,3 +1,7 @@
+console.log('[ENV DEBUG] Variables disponibles:', Object.keys(process.env).filter(k => k.includes('YOUTUBE') || k.includes('COOKIE')))
+console.log('[ENV DEBUG] YOUTUBE_COOKIES_B64 type:', typeof process.env.YOUTUBE_COOKIES_B64)
+console.log('[ENV DEBUG] YOUTUBE_COOKIES_B64 length:', process.env.YOUTUBE_COOKIES_B64?.length ?? 'undefined')
+
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs'
