@@ -51,6 +51,9 @@ const buildArgs = (url, extraArgs = []) => {
     '--no-playlist',
   ]
 
+  console.log('[ytdlp] COOKIES_PATH:', COOKIES_PATH)
+  console.log('[ytdlp] cookies exists:', existsSync(COOKIES_PATH))
+
   if (existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH)
   }
@@ -103,6 +106,7 @@ export async function getVideoInfo(url, isPlaylist = false) {
 
   if (isPlaylist) extraArgs.push('--flat-playlist')
   const args = buildArgs(url, extraArgs)
+  console.log('[ytdlp] Final args:', args)
 
   let stdout = ''
   let stderr = ''
@@ -205,6 +209,7 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
 
   extraArgs.push('-o', outputTemplate)
   const args = buildArgs(url, extraArgs)
+  console.log('[ytdlp] Final args:', args)
 
   await execFileAsync(YTDLP_PATH, args, {
     timeout: format === 'mp4' ? 10 * 60 * 1000 : 5 * 60 * 1000,
