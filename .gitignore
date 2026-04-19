@@ -1,10 +1,4 @@
-node_modules/
-dist/
-.env
-.env.local
-*.log
-.DS_Store
-Thumbs.db
-server/node_modules/
-server/bin/
-.vercel
+cookies.txt
+cookies.b64
+server/cookies.txt
+server/cookies.b64
