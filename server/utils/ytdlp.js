@@ -61,7 +61,9 @@ function isYoutubeBotCheckError(error) {
   const stderr = error?.stderr || ''
   const message = error?.message || ''
   const combined = `${message}\n${stderr}`.toLowerCase()
-  return combined.includes('sign in to confirm') && combined.includes('not a bot')
+  const isBot = combined.includes('sign in to confirm') && combined.includes('not a bot')
+  const isFormatNotAvailable = combined.includes('requested format is not available')
+  return isBot || isFormatNotAvailable
 }
 
 const buildArgs = (url, extraArgs = [], options = {}) => {
@@ -76,13 +78,14 @@ const buildArgs = (url, extraArgs = [], options = {}) => {
   const {
     disableYoutubeCookies = false,
     youtubeClientsOverride,
+    disableYoutubeExtractorArgs = false,
   } = options
 
   if (platform === 'youtube' && !disableYoutubeCookies && existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH)
   }
 
-  if (platform === 'youtube') {
+  if (platform === 'youtube' && !disableYoutubeExtractorArgs) {
     const ytClients = youtubeClientsOverride || YTDLP_YT_CLIENTS
     args.push('--extractor-args', `youtube:player_client=${ytClients}`)
   }
@@ -114,6 +117,7 @@ async function executeYtdlp(url, extraArgs, execOptions) {
     { disableYoutubeCookies: false, youtubeClientsOverride: YTDLP_YT_CLIENTS },
     { disableYoutubeCookies: true, youtubeClientsOverride: YTDLP_YT_FALLBACK_CLIENTS },
     { disableYoutubeCookies: true, youtubeClientsOverride: 'tv_embedded,tv,ios' },
+    { disableYoutubeCookies: true, disableYoutubeExtractorArgs: true },
   ]
 
   let lastError
