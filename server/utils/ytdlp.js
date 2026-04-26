@@ -1,7 +1,3 @@
-console.log('[ENV DEBUG] Variables disponibles:', Object.keys(process.env).filter(k => k.includes('YOUTUBE') || k.includes('COOKIE')))
-console.log('[ENV DEBUG] YOUTUBE_COOKIES_B64 type:', typeof process.env.YOUTUBE_COOKIES_B64)
-console.log('[ENV DEBUG] YOUTUBE_COOKIES_B64 length:', process.env.YOUTUBE_COOKIES_B64?.length ?? 'undefined')
-
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { writeFileSync, existsSync, mkdirSync, readdirSync } from 'fs'
@@ -28,6 +24,8 @@ const FFMPEG_LOCATION = FFMPEG_CANDIDATES.find((dir) =>
 const TEMP_DIR = join(tmpdir(), 'musicmasivedownload')
 if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true })
 
+const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+
 const COOKIES_PATH = join(dirname(fileURLToPath(import.meta.url)), 'cookies.txt')
 
 if (process.env.YOUTUBE_COOKIES_B64) {
@@ -45,21 +43,47 @@ if (process.env.YOUTUBE_COOKIES_B64) {
   console.warn('[ytdlp] ⚠️ No hay YOUTUBE_COOKIES_B64 configurada')
 }
 
+function detectPlatform(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    if (host.includes('youtube.com') || host.includes('youtu.be')) return 'youtube'
+    if (host.includes('facebook.com') || host.includes('fb.watch')) return 'facebook'
+    if (host.includes('instagram.com')) return 'instagram'
+    if (host.includes('tiktok.com')) return 'tiktok'
+  } catch {
+    return 'unknown'
+  }
+  return 'unknown'
+}
+
 const buildArgs = (url, extraArgs = []) => {
   const args = [
     '--no-warnings',
     '--no-playlist',
+    '--user-agent', DEFAULT_UA,
   ]
 
-  console.log('[ytdlp] COOKIES_PATH:', COOKIES_PATH)
-  console.log('[ytdlp] cookies exists:', existsSync(COOKIES_PATH))
+  const platform = detectPlatform(url)
 
-  if (existsSync(COOKIES_PATH)) {
+  if (platform === 'youtube' && existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH)
   }
 
-  args.push('--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
-  args.push('--extractor-args', `youtube:player_client=${YTDLP_YT_CLIENTS}`)
+  if (platform === 'youtube') {
+    args.push('--extractor-args', `youtube:player_client=${YTDLP_YT_CLIENTS}`)
+  }
+
+  if (platform === 'facebook') {
+    args.push('--add-header', 'Referer:https://www.facebook.com/')
+  }
+
+  if (platform === 'instagram') {
+    args.push('--add-header', 'Referer:https://www.instagram.com/')
+  }
+
+  if (platform === 'tiktok') {
+    args.push('--add-header', 'Referer:https://www.tiktok.com/')
+  }
 
   return [...args, ...extraArgs, url]
 }
@@ -106,7 +130,6 @@ export async function getVideoInfo(url, isPlaylist = false) {
 
   if (isPlaylist) extraArgs.push('--flat-playlist')
   const args = buildArgs(url, extraArgs)
-  console.log('[ytdlp] Final args:', args)
 
   let stdout = ''
   let stderr = ''
@@ -121,6 +144,7 @@ export async function getVideoInfo(url, isPlaylist = false) {
     stderr = error?.stderr || ''
     const msg = error?.message || ''
     const combined = `${msg}\n${stderr}`
+    const combinedLower = combined.toLowerCase()
 
     console.error('[yt-dlp error]', {
       message: error?.message,
@@ -131,7 +155,12 @@ export async function getVideoInfo(url, isPlaylist = false) {
     if (combined.includes('This video is unavailable')) {
       throw new Error('Este video no esta disponible o es privado.')
     }
-    if (combined.includes('Sign in to confirm') || combined.includes('age')) {
+    if (
+      combinedLower.includes('sign in to confirm') ||
+      combinedLower.includes('age-restricted') ||
+      combinedLower.includes('age restricted') ||
+      combinedLower.includes('confirm your age')
+    ) {
       throw new Error('Este video requiere confirmacion de edad o inicio de sesion.')
     }
     if (combined.includes('Private video')) {
@@ -209,7 +238,6 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
 
   extraArgs.push('-o', outputTemplate)
   const args = buildArgs(url, extraArgs)
-  console.log('[ytdlp] Final args:', args)
 
   await execFileAsync(YTDLP_PATH, args, {
     timeout: format === 'mp4' ? 10 * 60 * 1000 : 5 * 60 * 1000,
