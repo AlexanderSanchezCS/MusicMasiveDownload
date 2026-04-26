@@ -58,6 +58,7 @@ function detectPlatform(url) {
 
 const buildArgs = (url, extraArgs = []) => {
   const args = [
+    '--ignore-config',
     '--no-warnings',
     '--no-playlist',
     '--user-agent', DEFAULT_UA,
@@ -219,8 +220,23 @@ function getVideoQuality(quality) {
   return map[quality] || map['720']
 }
 
+function getVideoFormat(quality, platform) {
+  if (platform === 'youtube') {
+    return getVideoQuality(quality)
+  }
+
+  // Instagram/Facebook/TikTok often expose progressive streams only.
+  // Prefer constrained MP4 and gracefully fallback to any best format.
+  const q = Number.parseInt(quality, 10)
+  if (Number.isFinite(q)) {
+    return `best[ext=mp4][height<=${q}]/best[height<=${q}]/best[ext=mp4]/best`
+  }
+  return 'best[ext=mp4]/best'
+}
+
 export async function downloadMedia(url, format = 'mp3', quality = '192', title = '') {
   url = cleanYoutubeUrl(url)
+  const platform = detectPlatform(url)
   const id = randomUUID()
   const outputTemplate = join(TEMP_DIR, `${id}.%(ext)s`)
 
@@ -233,7 +249,7 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
   if (format === 'mp3') {
     extraArgs.push('-x', '--audio-format', 'mp3', '--audio-quality', getAudioQuality(quality))
   } else {
-    extraArgs.push('-f', getVideoQuality(quality), '--merge-output-format', 'mp4')
+    extraArgs.push('-f', getVideoFormat(quality, platform), '--merge-output-format', 'mp4')
   }
 
   extraArgs.push('-o', outputTemplate)
