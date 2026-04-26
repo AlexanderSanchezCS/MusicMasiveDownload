@@ -259,15 +259,16 @@ function getAudioQuality(quality) {
 }
 
 function getVideoQuality(quality) {
-  const map = {
-    '360': 'bestvideo[height<=360]+bestaudio/best[height<=360]',
-    '480': 'bestvideo[height<=480]+bestaudio/best[height<=480]',
-    '720': 'bestvideo[height<=720]+bestaudio/best[height<=720]',
-    '1080': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-    '1440': 'bestvideo[height<=1440]+bestaudio/best[height<=1440]',
-    '2160': 'bestvideo[height<=2160]+bestaudio/best[height<=2160]',
-  }
-  return map[quality] || map['720']
+  const q = Number.parseInt(quality, 10)
+  if (!Number.isFinite(q)) return 'bestvideo+bestaudio/best'
+
+  // Multi-fallback format string: try best separated video+audio first,
+  // then best single format with height constraint, then best overall
+  return (
+    `bestvideo[height<=${q}]+bestaudio/best[height<=${q}]/` +
+    `bestvideo[height<=${q}]/bestaudio[height<=${q}]/` +
+    `best[height<=${q}]/best`
+  )
 }
 
 function getVideoFormat(quality, platform) {
