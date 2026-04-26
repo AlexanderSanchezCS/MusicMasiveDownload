@@ -13,6 +13,7 @@ const __dirname = dirname(__filename)
 
 const YTDLP_PATH = process.env.YTDLP_PATH || 'yt-dlp'
 const YTDLP_YT_CLIENTS = process.env.YTDLP_YT_CLIENTS || 'mweb,web_safari,tv'
+const YTDLP_YT_FALLBACK_CLIENTS = process.env.YTDLP_YT_FALLBACK_CLIENTS || 'android,ios,tv_embedded'
 const FFMPEG_CANDIDATES = [
   join(__dirname, '..', 'bin', 'ffmpeg-master-latest-win64-gpl', 'bin'),
   join(__dirname, '..', 'bin'),
@@ -56,7 +57,14 @@ function detectPlatform(url) {
   return 'unknown'
 }
 
-const buildArgs = (url, extraArgs = []) => {
+function isYoutubeBotCheckError(error) {
+  const stderr = error?.stderr || ''
+  const message = error?.message || ''
+  const combined = `${message}\n${stderr}`.toLowerCase()
+  return combined.includes('sign in to confirm') && combined.includes('not a bot')
+}
+
+const buildArgs = (url, extraArgs = [], options = {}) => {
   const args = [
     '--ignore-config',
     '--no-warnings',
@@ -65,13 +73,18 @@ const buildArgs = (url, extraArgs = []) => {
   ]
 
   const platform = detectPlatform(url)
+  const {
+    disableYoutubeCookies = false,
+    youtubeClientsOverride,
+  } = options
 
-  if (platform === 'youtube' && existsSync(COOKIES_PATH)) {
+  if (platform === 'youtube' && !disableYoutubeCookies && existsSync(COOKIES_PATH)) {
     args.push('--cookies', COOKIES_PATH)
   }
 
   if (platform === 'youtube') {
-    args.push('--extractor-args', `youtube:player_client=${YTDLP_YT_CLIENTS}`)
+    const ytClients = youtubeClientsOverride || YTDLP_YT_CLIENTS
+    args.push('--extractor-args', `youtube:player_client=${ytClients}`)
   }
 
   if (platform === 'facebook') {
@@ -87,6 +100,37 @@ const buildArgs = (url, extraArgs = []) => {
   }
 
   return [...args, ...extraArgs, url]
+}
+
+async function executeYtdlp(url, extraArgs, execOptions) {
+  const platform = detectPlatform(url)
+
+  if (platform !== 'youtube') {
+    const args = buildArgs(url, extraArgs)
+    return execFileAsync(YTDLP_PATH, args, execOptions)
+  }
+
+  const attempts = [
+    { disableYoutubeCookies: false, youtubeClientsOverride: YTDLP_YT_CLIENTS },
+    { disableYoutubeCookies: true, youtubeClientsOverride: YTDLP_YT_FALLBACK_CLIENTS },
+    { disableYoutubeCookies: true, youtubeClientsOverride: 'tv_embedded,tv,ios' },
+  ]
+
+  let lastError
+  for (let i = 0; i < attempts.length; i += 1) {
+    const args = buildArgs(url, extraArgs, attempts[i])
+    try {
+      return await execFileAsync(YTDLP_PATH, args, execOptions)
+    } catch (error) {
+      lastError = error
+      const shouldRetry = isYoutubeBotCheckError(error) && i < attempts.length - 1
+      if (!shouldRetry) {
+        throw error
+      }
+    }
+  }
+
+  throw lastError
 }
 
 function cleanYoutubeUrl(rawUrl) {
@@ -135,7 +179,7 @@ export async function getVideoInfo(url, isPlaylist = false) {
   let stdout = ''
   let stderr = ''
   try {
-    const result = await execFileAsync(YTDLP_PATH, args, {
+    const result = await executeYtdlp(url, extraArgs, {
       timeout: isPlaylist ? 30000 : 20000,
       maxBuffer: 5 * 1024 * 1024,
     })
@@ -156,8 +200,10 @@ export async function getVideoInfo(url, isPlaylist = false) {
     if (combined.includes('This video is unavailable')) {
       throw new Error('Este video no esta disponible o es privado.')
     }
+    if (combinedLower.includes('sign in to confirm') && combinedLower.includes('not a bot')) {
+      throw new Error('YouTube bloqueo la solicitud por verificacion antibot. Intenta nuevamente o usa cookies/proxy residencial actualizados.')
+    }
     if (
-      combinedLower.includes('sign in to confirm') ||
       combinedLower.includes('age-restricted') ||
       combinedLower.includes('age restricted') ||
       combinedLower.includes('confirm your age')
@@ -253,9 +299,7 @@ export async function downloadMedia(url, format = 'mp3', quality = '192', title 
   }
 
   extraArgs.push('-o', outputTemplate)
-  const args = buildArgs(url, extraArgs)
-
-  await execFileAsync(YTDLP_PATH, args, {
+  await executeYtdlp(url, extraArgs, {
     timeout: format === 'mp4' ? 10 * 60 * 1000 : 5 * 60 * 1000,
     maxBuffer: 10 * 1024 * 1024,
   })
