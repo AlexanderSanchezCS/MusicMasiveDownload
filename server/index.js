@@ -134,6 +134,15 @@ app.use((req, res, next) => {
   next()
 })
 
+// Root route — simple status for Render health checks
+app.get('/', (req, res) => {
+  res.json({
+    service: 'MusicMasiveDownload API',
+    status: 'running',
+    docs: '/api/health',
+  })
+})
+
 // Health check — includes download queue stats for monitoring
 app.get('/api/health', (req, res) => {
   res.json({
