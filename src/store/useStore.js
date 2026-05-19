@@ -80,7 +80,7 @@ const ALL_HOSTS = PLATFORMS.flatMap(p => p.hosts)
 function friendlyError(error) {
   const msg = error?.message || ''
   if (msg.includes('Application not found') || msg.includes('backend-unavailable')) {
-    return 'El backend de descargas no está disponible. Verifica VITE_API_URL en Vercel y que Railway esté activo.'
+    return 'El backend de descargas no está disponible. Verifica que el servidor esté activo y VITE_API_URL sea correcto.'
   }
   if (msg === 'Failed to fetch' || msg === 'NetworkError when attempting to fetch resource.') {
     return 'No se pudo conectar con el servidor. Verifica tu conexión o inténtalo más tarde.'
@@ -162,7 +162,10 @@ const useStore = create((set, get) => ({
 
   // Format & Quality
   format: 'mp3',
-  setFormat: (format) => set({ format }),
+  setFormat: (format) => set((s) => ({
+    format,
+    quality: format === 'mp4' ? '720' : '192',
+  })),
   quality: '192',
   setQuality: (quality) => set({ quality }),
 

@@ -12,7 +12,7 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp && \
     chmod +x /usr/local/bin/yt-dlp
 
-RUN yt-dlp --version && ffmpeg -version
+RUN yt-dlp --version && ffmpeg -version | head -1
 
 WORKDIR /app
 

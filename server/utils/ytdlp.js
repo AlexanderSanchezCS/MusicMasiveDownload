@@ -17,10 +17,20 @@ const YTDLP_YT_FALLBACK_CLIENTS = process.env.YTDLP_YT_FALLBACK_CLIENTS || 'andr
 const FFMPEG_CANDIDATES = [
   join(__dirname, '..', 'bin', 'ffmpeg-master-latest-win64-gpl', 'bin'),
   join(__dirname, '..', 'bin'),
+  '/usr/bin',
+  '/usr/local/bin',
 ]
-const FFMPEG_LOCATION = FFMPEG_CANDIDATES.find((dir) =>
-  existsSync(join(dir, 'ffmpeg.exe')) || existsSync(join(dir, 'ffmpeg'))
-)
+
+function findFfmpeg() {
+  for (const dir of FFMPEG_CANDIDATES) {
+    if (existsSync(join(dir, 'ffmpeg')) || existsSync(join(dir, 'ffmpeg.exe'))) {
+      return dir
+    }
+  }
+  return null
+}
+
+const FFMPEG_LOCATION = findFfmpeg()
 
 const TEMP_DIR = join(tmpdir(), 'musicmasivedownload')
 if (!existsSync(TEMP_DIR)) mkdirSync(TEMP_DIR, { recursive: true })
